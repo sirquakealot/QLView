@@ -40,7 +40,7 @@ A Python desktop application to monitor a Quake-engine game server. It displays 
 2.  Place a `quake3.ico` file (or your preferred icon) in the same directory as the script if you want a custom icon for the window and tray.
 3.  Run the script from your terminal:
     ```bash
-    python quake_server_viewer.py
+    python qlview.py
     ```
 
 ## Configuration
