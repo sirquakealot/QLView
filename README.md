@@ -63,4 +63,7 @@ Map images are expected in the `Mapshots` directory. You can add your own `.png`
 * The "Start with system" feature creates a shortcut in the appropriate OS-specific startup folder.
 * The application uses `sys._MEIPASS` for path resolution when running as a bundled executable.
 
+preview: 
+![alt text](https://github.com/realkraz0r/QLView/releases/download/1.0/preview.png "QLView")
+
 GL & HF
