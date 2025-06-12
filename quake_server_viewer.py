@@ -132,7 +132,7 @@ def update_map_preview(mapname_param):
             try:
                 img_opened = Image.open(path_to_check)
                 if img_opened.mode not in ['RGB', 'RGBA']:
-                    img_opened = img_opened.convert('RGBA' if 'A' in img_opened.mode else 'RGB')
+                    img_opened = img_opened.convert('RGBA' if 'A' in img.mode else 'RGB')
                 pil_image_obj = img_opened.resize((256, 192), Image.Resampling.LANCZOS)
                 break
             except Exception as e:
@@ -268,8 +268,9 @@ def handle_connection_error(specific_error_msg="Failed to connect."):
 
 # --- GUI Rendering & Auto Height ---
 def render_colored_name(parent, name_str):
-    color_map = {"0": "black", "1": "red", "2": "green", "3": "yellow", "4": "blue", "5": "cyan", "6": "magenta", "7": "black"} # Changed 'white' to 'black'
+    color_map = {"0": "black", "1": "red", "2": "green", "3": "yellow", "4": "blue", "5": "cyan", "6": "magenta", "7": "black"}
     default_color = "black"
+    # Der Container-Frame bekommt einen 1px-Rand, um eventuelle Lücken zu kaschieren
     name_container = tk.Frame(parent, bg=parent.cget("bg"))
     current_text = ""
     current_color = default_color
@@ -277,7 +278,18 @@ def render_colored_name(parent, name_str):
     while i < len(name_str):
         if name_str[i] == '^' and i + 1 < len(name_str) and name_str[i+1] in color_map:
             if current_text:
-                tk.Label(name_container, text=current_text, fg=current_color, font=("Arial", 10), bg=parent.cget("bg")).pack(side="left")
+                label = tk.Label(
+                    name_container,
+                    text=current_text,
+                    fg=current_color,
+                    font=("Arial", 10),
+                    bg=parent.cget("bg"),
+                    padx=0,  # Kein innerer horizontaler Abstand
+                    pady=0,  # Kein innerer vertikaler Abstand
+                    borderwidth=0,  # Keine Randbreite
+                    highlightthickness=0  # Kein Fokus-Rand
+                )
+                label.pack(side="left") # pack ohne padding, da im Label definiert
             current_text = ""
             current_color = color_map[name_str[i+1]]
             i += 2
@@ -285,7 +297,18 @@ def render_colored_name(parent, name_str):
             current_text += name_str[i]
             i += 1
     if current_text:
-        tk.Label(name_container, text=current_text, fg=current_color, font=("Arial", 10), bg=parent.cget("bg")).pack(side="left")
+        label = tk.Label(
+            name_container,
+            text=current_text,
+            fg=current_color,
+            font=("Arial", 10),
+            bg=parent.cget("bg"),
+            padx=0,
+            pady=0,
+            borderwidth=0,
+            highlightthickness=0
+        )
+        label.pack(side="left")
     return name_container
 
 def update_player_list(players):
@@ -339,7 +362,7 @@ def auto_adjust_window_geometry():
     h_player = player_frame.winfo_reqheight()
     h_buttons = button_frame.winfo_reqheight()
     
-    calculated_height = (h_preview + h_info + h_sep + h_player + h_buttons + 55) # Paddings summed up
+    calculated_height = (h_preview + h_info + h_sep + h_player + h_buttons + 55)
     final_height = max(calculated_height, MIN_WINDOW_HEIGHT)
     
     current_width = root.winfo_width()
@@ -641,10 +664,6 @@ def connect_to_server():
         error_message_var.set("Error: Could not open Steam link.")
         print(f"ERROR: Could not open Steam link: {e}")
 
-def on_minimize_to_tray(event=None):
-    if root.state() == 'normal':
-        root.withdraw()
-
 def shutdown_application(icon=None, item=None):
     global tray_icon, root, shutting_down
     if shutting_down: return
@@ -727,8 +746,18 @@ if __name__ == "__main__":
     tk.Button(button_frame, text="Connect", command=connect_to_server, width=10).pack(side="left", padx=20)
     tk.Button(button_frame, text="Options", command=open_options_window, width=10).pack(side="right", padx=20)
 
+    # --- Window Event Handling (Minimize/Close) ---
+    def on_minimize_to_tray(event=None):
+        # Final, simplest version. Just hide the window.
+        root.withdraw()
+
+    # When the user clicks the minimize button ('-'), hide the window to the tray.
     root.bind("<Unmap>", on_minimize_to_tray)
+
+    # When the user clicks the close button ('X'), close the application.
     root.protocol("WM_DELETE_WINDOW", shutdown_application)
+    # --- End of Event Handling ---
+
     os.makedirs(MAPSHOTS_DIR, exist_ok=True)
 
     set_placeholder_or_clear_preview()
