@@ -42,7 +42,10 @@ A Python desktop application to monitor a Quake-engine game server. It displays 
     ```bash
     python qlview.py
     ```
+## .EXE
 
+    pyinstaller --noconsole --icon="quake3.ico" --onedir --add-data="quake3.ico;." --add-data="Mapshots;Mapshots" --hidden-import="pystray._win32" quake_server_viewer.py
+   
 ## Configuration
 
 The application creates and uses a `config.ini` file in the same directory to store settings like:
@@ -64,6 +67,9 @@ Map images are expected in the `Mapshots` directory. You can add your own `.png`
 * The application uses `sys._MEIPASS` for path resolution when running as a bundled executable.
 
 preview: 
-![alt text](https://github.com/realkraz0r/QLView/releases/download/1.0/preview.png "QLView")
+
+![preview1](https://github.com/realkraz0r/QLView/releases/download/1.0/preview.png "QLView")
+
+![preview2](https://github.com/realkraz0r/QLView/releases/download/1.0/tray2.jpg "QLView")
 
 GL & HF
