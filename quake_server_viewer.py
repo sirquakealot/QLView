@@ -678,6 +678,14 @@ def shutdown_application(icon=None, item=None):
     if root and root.winfo_exists():
         root.destroy()
 
+def on_toggle_visibility(icon=None, item=None):
+    if root:
+        # Using state() is more reliable than is_visible() across platforms
+        if root.state() == 'withdrawn':
+            root.after(0, lambda: [root.deiconify(), root.lift(), root.focus_force()])
+        else:
+            root.withdraw()
+
 def on_show_from_tray(icon=None, item=None):
     if root:
         root.after(0, lambda: [root.deiconify(), root.lift(), root.focus_force()])
@@ -688,7 +696,7 @@ def setup_tray_icon():
         icon_path = resource_path("quake3.ico")
         image = Image.open(icon_path)
         menu = pystray.Menu(
-            pystray.MenuItem("Show", on_show_from_tray, default=True),
+            pystray.MenuItem("Show / Hide", on_toggle_visibility, default=True),
             pystray.MenuItem("Quit", shutdown_application)
         )
         tray_icon = pystray.Icon(APP_NAME.lower(), image, APP_NAME, menu)
