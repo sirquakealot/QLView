@@ -68,8 +68,8 @@ Map images are expected in the `Mapshots` directory. You can add your own `.png`
 
 preview: 
 
-![preview1](https://github.com/realkraz0r/QLView/releases/download/1.2/preview.png "QLView")
+![preview1](https://github.com/realkraz0r/QLView/releases/download/1.3/preview.png "QLView")
 
-![preview2](https://github.com/realkraz0r/QLView/releases/download/1.2/tray2.jpg "QLView")
+![preview2](https://github.com/realkraz0r/QLView/releases/download/1.3/tray2.jpg "QLView")
 
 GL & HF
