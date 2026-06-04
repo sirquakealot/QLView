@@ -91,8 +91,7 @@ CONNECT_COMMAND = "steam://connect/{ip}:{port}"
 ```
 
 ## Preview
-
-![preview1](https://github.com/realkraz0r/QLView/releases/download/1.3/preview.png "QLView")
-![preview2](https://github.com/realkraz0r/QLView/releases/download/1.3/tray2.jpg "QLView")
+preview: 
+![preview1](https://github.com/realkraz0r/QLView/releases/download/1.6/preview1.jpg "QLView")
 
 GL & HF
