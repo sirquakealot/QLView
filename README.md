@@ -83,7 +83,6 @@ Map images go in the `Mapshots` directory as `.png` or `.jpg` files named after 
 * `sys._MEIPASS` is used for path resolution when running as a bundled executable.
 
 ## Preview
-preview: 
 ![preview1](https://github.com/realkraz0r/QLView/releases/download/1.6/preview1.jpg "QLView")
 
 GL & HF
