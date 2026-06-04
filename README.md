@@ -82,14 +82,6 @@ Map images go in the `Mapshots` directory as `.png` or `.jpg` files named after 
 * "Start with system" creates a shortcut in the OS-specific startup folder (Windows).
 * `sys._MEIPASS` is used for path resolution when running as a bundled executable.
 
-## Known issue
-
-The "Connect" action calls `config.CONNECT_COMMAND`, which is **not defined** in `config.py`. As shipped, clicking Connect (button or tray) will raise an error. To enable it, add a line such as the following to `config.py`:
-
-```python
-CONNECT_COMMAND = "steam://connect/{ip}:{port}"
-```
-
 ## Preview
 preview: 
 ![preview1](https://github.com/realkraz0r/QLView/releases/download/1.6/preview1.jpg "QLView")
