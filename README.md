@@ -1,75 +1,98 @@
-# Quake Server Viewer
+# QLView – Quake Server Viewer
 
-A Python desktop application to monitor a Quake-engine game server. It displays server information, current map, player list, and provides an option to connect to the server.
+A Python desktop application to monitor a Quake-engine game server (built for Quake Live). It displays live server information, the current map, the player list, and lets you connect to the server with one click.
 
 ## Features
 
-* Displays server name, current map, and player count.
-* Shows a thumbnail image for the current map (if available locally or downloaded).
-* Lists connected players, their scores (if applicable, though the script shows duration), and time on the server.
-* "Connect" button to join the server (uses Steam's `steam://connect/` protocol).
-* "Options" panel to configure:
-    * Server IP address and port.
-    * Data refresh interval.
-    * Show/hide map thumbnail.
-    * Start minimized to tray on next launch.
-    * Start with system (OS dependent).
-    * Download custom map images.
-* Minimizes to system tray with basic controls (Show/Quit).
-* Player names can be displayed with Quake color codes.
-* Mapshots are stored in a `Mapshots` directory. A placeholder is used if a map image is not found.
+* Displays server name, current map and player count (also shown in the window title and tray tooltip).
+* Live ping measurement via a Quake `getchallenge` request on the game port (close to the real in-game ping).
+* Shows a thumbnail image for the current map from the local `Mapshots` directory, with a placeholder if none is found.
+* Player list split into active players (sorted by score) and spectators/bots (sorted by time on server), each with their time connected.
+* Player names rendered with Quake color codes (`^0`–`^9`).
+* "Connect" button and tray entry to join the server via Steam's `steam://connect/` protocol.
+* Up to 6 server favorites with optional hotkeys; favorite 1 doubles as the main server that is displayed.
+* 27 selectable color schemes with live preview.
+* Switchable layout: player list on the right (side-by-side) or below the server info (stacked).
+* Minimizes to the system tray with Show/Hide, Refresh, Connect and Exit controls.
+
+## Project structure
+
+The application is split into several modules (it used to be a single file):
+
+* `main.py` – entry point; builds the window, tray icon and wires everything together.
+* `ui.py` – the `UIManager`: window layout, options panel, player list and color schemes.
+* `server.py` – the `ServerHandler`: server queries (via `a2s`) and ping measurement.
+* `utils.py` – helpers for config/favorites loading and saving, address parsing, autostart.
+* `config.py` – constants, default server, and the color scheme definitions.
 
 ## Requirements
 
 * Python 3.x
-* The following Python libraries (install via pip):
-    * `a2s` (for querying game servers)
-    * `Pillow` (for image handling)
-    * `pystray` (for the system tray icon)
-    * `winshell` (on Windows, for "start with system" shortcut creation)
-    * `pywin32` (on Windows, dependency for `winshell` or other system interactions)
+* Python libraries (install via pip):
+    * `a2s` (querying game servers — the PyPI package is `python-a2s`)
+    * `Pillow` (image handling)
+    * `pystray` (system tray icon)
+    * `winshell` (Windows only, for the "start with system" shortcut)
+    * `pywin32` (Windows only, dependency for `winshell` / system interactions)
 
-    ```bash
-    pip install a2s Pillow pystray winshell pywin32
-    ```
-    *Note: `tkinter` is used for the GUI and is typically included with standard Python installations.*
+```bash
+pip install python-a2s Pillow pystray winshell pywin32
+```
 
-## How to Run
+*Note: `tkinter` is used for the GUI and is normally included with standard Python installations.*
 
-1.  Ensure all requirements are installed.
-2.  Place a `quake3.ico` file (or your preferred icon) in the same directory as the script if you want a custom icon for the window and tray.
-3.  Run the script from your terminal:
-    ```bash
-    python qlview.py
-    ```
-## .EXE
+## How to run
 
-    pyinstaller --noconsole --icon="quake3.ico" --onedir --add-data="quake3.ico;." --add-data="Mapshots;Mapshots" --hidden-import="pystray._win32" quake_server_viewer.py
-   
+1. Install the requirements above.
+2. Place a `quake3.ico` file in the same directory as the scripts for the window and tray icon.
+3. Run the entry point from a terminal:
+
+```bash
+python main.py
+```
+
+## Building an .EXE
+
+```bash
+pyinstaller --noconsole --icon="quake3.ico" --onedir --add-data="quake3.ico;." --add-data="Mapshots;Mapshots" --hidden-import="pystray._win32" main.py
+```
+
 ## Configuration
 
-The application creates and uses a `config.ini` file in the same directory to store settings like:
-* Server address and port
+The application creates and uses a `config.ini` file in the same directory for:
+
+* Main server address and port
 * Refresh interval
-* Thumbnail visibility preference
-* Start minimized option
-* Start with system option
+* Show favorite hotkeys
+* Start minimized
+* Start with system
+* Player list position (right / bottom)
+* Color scheme
 
-These settings can be changed via the "Options" menu in the application.
+Favorites are stored separately in `favorites.json` (entries 1–6, where 1 is the main server).
 
-The default server is set to `108.61.179.235:27962` with a refresh interval of `10` seconds.
+Settings are changed through the in-app "Options" window, which has two tabs: **General** (interval, the six server favorites, application settings) and **Appearance** (hotkeys, layout, color scheme).
 
-Map images are expected in the `Mapshots` directory. You can add your own `.png` or `.jpg` files named after the map (e.g., `cpm22.png`).
+The default server is `108.61.179.235:27962` with a refresh interval of `10` seconds.
+
+Map images go in the `Mapshots` directory as `.png` or `.jpg` files named after the map (e.g. `cpm22.png`).
 
 ## Notes
 
-* The "Start with system" feature creates a shortcut in the appropriate OS-specific startup folder.
-* The application uses `sys._MEIPASS` for path resolution when running as a bundled executable.
+* "Start with system" creates a shortcut in the OS-specific startup folder (Windows).
+* `sys._MEIPASS` is used for path resolution when running as a bundled executable.
 
-preview: 
+## Known issue
+
+The "Connect" action calls `config.CONNECT_COMMAND`, which is **not defined** in `config.py`. As shipped, clicking Connect (button or tray) will raise an error. To enable it, add a line such as the following to `config.py`:
+
+```python
+CONNECT_COMMAND = "steam://connect/{ip}:{port}"
+```
+
+## Preview
 
 ![preview1](https://github.com/realkraz0r/QLView/releases/download/1.3/preview.png "QLView")
-
 ![preview2](https://github.com/realkraz0r/QLView/releases/download/1.3/tray2.jpg "QLView")
 
 GL & HF
