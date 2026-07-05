@@ -1,8 +1,7 @@
 ﻿import tkinter as tk
 from tkinter import ttk, messagebox
-import webbrowser
 import os
-import re
+import webbrowser
 from PIL import Image, ImageTk
 import utils
 import config
@@ -23,7 +22,15 @@ class UIManager:
         self.ip_label_var = tk.StringVar(value="...")
         self.ping_var = tk.StringVar(value="...")
         self.game_type_var = tk.StringVar(value="...")
+        self.elo_info_var = tk.StringVar(value="...")
         self.error_message_var = tk.StringVar()
+
+        # ELO-Zustand: zuletzt empfangene Name->Rating-Zuordnung, damit ein
+        # Schema-Wechsel (Neuzeichnen mit alter Liste) die ELOs behält.
+        self.last_elo_by_name = {}
+        self.last_steamid_by_name = {}
+        self.last_team_by_name = {}
+        self.last_server_info = {}
         
         # Einstellungen Variablen
         self.show_hotkeys_var = tk.BooleanVar(value=self.app.app_config.get("show_hotkeys", True))
@@ -55,8 +62,8 @@ class UIManager:
         self.root.after(100, self.auto_adjust_window_geometry)
 
     def _arrange_panes(self):
-        for col in range(3): self.main_container.grid_columnconfigure(col, weight=0)
-        for row in range(3): self.main_container.grid_rowconfigure(row, weight=0)
+        for col in range(3): self.main_container.grid_columnconfigure(col, weight=0, minsize=0)
+        for row in range(3): self.main_container.grid_rowconfigure(row, weight=0, minsize=0)
         
         self.info_pane.grid_forget()
         self.separator.grid_forget()
@@ -98,27 +105,33 @@ class UIManager:
         self.header_frame = tk.Frame(parent)
         self.header_frame.pack(fill="x", pady=(5,0))
         
-        self.header_frame.grid_columnconfigure(0, weight=0)
-        self.header_frame.grid_columnconfigure(1, weight=1) 
-        self.header_frame.grid_columnconfigure(2, weight=0) 
+        self.header_frame.grid_columnconfigure(0, weight=1, uniform="hdr")
+        self.header_frame.grid_columnconfigure(1, weight=0) 
+        self.header_frame.grid_columnconfigure(2, weight=1, uniform="hdr") 
         
         self.hotkeys_container = tk.Frame(self.header_frame, width=30)
-        self.hotkeys_container.grid(row=0, column=0, sticky="nsw", padx=(0, 5)) 
+        self.hotkeys_container.grid(row=0, column=0, sticky="nse", padx=(0, 5)) 
         self.hotkeys_container.pack_propagate(False) 
         
         self.hotkeys_button_frame = tk.Frame(self.hotkeys_container) 
         self.hotkeys_button_frame.pack(side="top", fill="y", anchor="e") 
         
-        for i in range(1, 7):
+        for i in range(1, 8):
             btn = self._create_hotkey_button(self.hotkeys_button_frame, str(i), lambda i=i: self.app.switch_to_favorite(i))
             btn.pack(side="top", anchor="e", pady=2)
             
         self.preview_label = tk.Label(self.header_frame, borderwidth=2, relief="solid", cursor="hand2")
         self.preview_label.grid(row=0, column=1, padx=5, sticky="") 
         self.preview_label.bind("<Button-1>", lambda e: self.app.server_handler.manual_refresh())
-        
-        tk.Frame(self.header_frame, width=30).grid(row=0, column=2, sticky="nse")
-        
+
+        # Rechts neben dem Bild der Spielstand (rot:blau aus qlstats). Sitzt in
+        # der rechten uniform-Spalte (sticky w), damit das Bild mittig bleibt.
+        self.stats_container = tk.Frame(self.header_frame)
+        self.stats_container.grid(row=0, column=2, sticky="nsw", padx=(5, 0))
+        self.score_var = tk.StringVar(value="")
+        self.score_label = tk.Label(self.stats_container, textvariable=self.score_var, font=("Arial", 12, "bold"))
+        self.score_label.pack(anchor="w")
+
         self.toggle_hotkeys() 
 
     def _create_info_frame(self, parent):
@@ -127,7 +140,7 @@ class UIManager:
         info_frame = tk.Frame(self.info_outer_frame)
         info_frame.pack(anchor="w")
         
-        info_labels_config = [("Server:", self.server_name_var), ("IP:", self.ip_label_var), ("Ping:", self.ping_var), ("Map:", self.map_name_var), ("Players:", self.player_count_var), ("Gamemode:", self.game_type_var)]
+        info_labels_config = [("Server:", self.server_name_var), ("IP:", self.ip_label_var), ("Ping:", self.ping_var), ("Map:", self.map_name_var), ("Players:", self.player_count_var), ("Gamemode:", self.game_type_var), ("ELO:", self.elo_info_var)]
         for i, (text, var) in enumerate(info_labels_config):
             tk.Label(info_frame, text=text, font=("Arial", 10, "bold")).grid(row=i, column=0, sticky="e", padx=(0,5), pady=0)
             lbl = tk.Label(info_frame, textvariable=var, font=("Arial", 10), wraplength=250, justify=tk.LEFT)
@@ -181,18 +194,76 @@ class UIManager:
         self._bind_mouse_wheel_recursive(self.player_canvas)
 
 
-    def update_player_list(self, players):
+    def update_player_list(self, players, elo_by_name=None, steamid_by_name=None, team_by_name=None):
         # Zuletzt empfangene Spielerliste merken, damit ein Schema-Wechsel
         # die Liste in den neuen Farben neu zeichnen kann.
         self.last_players = players
+        # ELO/SteamID/Team nur überschreiben, wenn neue Daten geliefert wurden.
+        # Beim Schema-Neuzeichnen (=None) bleiben die alten erhalten.
+        if elo_by_name is not None:
+            self.last_elo_by_name = elo_by_name
+        if steamid_by_name is not None:
+            self.last_steamid_by_name = steamid_by_name
+        if team_by_name is not None:
+            self.last_team_by_name = team_by_name
+
+        # Scrollposition merken, damit die Liste bei jeder Aktualisierung nicht
+        # nach oben springt.
+        try:
+            prev_top = self.player_canvas.yview()[0]
+        except Exception:
+            prev_top = 0.0
+
         for widget in self.scrollable_frame.winfo_children(): widget.destroy()
         if not self.current_color_scheme: return
         bg_color = self.current_color_scheme["bg"]; fg_color = self.current_color_scheme["fg"]
         self.scrollable_frame.configure(bg=bg_color)
 
-        spectators = sorted([p for p in players if p.score < 0 or p.name in config.BOT_NAMES], key=lambda p: p.duration, reverse=True)
-        playing = sorted([p for p in players if p.score >= 0 and p.name not in config.BOT_NAMES], key=lambda p: p.score, reverse=True)
-        
+        # Spectator-Erkennung ueber das qlstats-Team (zuverlaessig; der
+        # A2S-Score ist bei QL unbrauchbar). team -1 oder >=3 = Spectator,
+        # 0/1/2 = aktiv. Ohne qlstats-Daten Fallback auf A2S-Score < 0.
+        def team_of(p):
+            return self.last_team_by_name.get(utils.normalize_name(p.name))
+        def is_spec(p):
+            if p.name in config.BOT_NAMES:
+                return True
+            t = team_of(p)
+            if t is not None:
+                return t < 0 or t >= 3
+            return p.score < 0
+        def team_rank(p):
+            t = team_of(p)
+            return t if t is not None else 99
+        def elo_of(p):
+            return self.last_elo_by_name.get(utils.normalize_name(p.name)) or 0
+
+        spectators = sorted([p for p in players if is_spec(p)], key=lambda p: p.duration, reverse=True)
+        # Aktive nach Team (1=rot, 2=blau, dann Rest), innerhalb nach Score.
+        playing = sorted(
+            [p for p in players if not is_spec(p)],
+            key=lambda p: (team_rank(p), -p.score),
+        )
+
+        # Spielstand im Header:
+        #  - Team-Spiel (scoreRed/scoreBlue vorhanden): echte Werte, leer -> 0
+        #  - Duel: die zwei hoechsten Frags der aktiven Spieler
+        #  - sonst (FFA/Race/...): ausblenden
+        info = self.last_server_info or {}
+        gt = str(info.get("gt") or "").lower()
+        if "scoreRed" in info and "scoreBlue" in info:
+            r = str(info.get("scoreRed", "")).strip()
+            b = str(info.get("scoreBlue", "")).strip()
+            r = r if r.lstrip("-").isdigit() else "0"
+            b = b if b.lstrip("-").isdigit() else "0"
+            self._set_match_score("{} : {}".format(r, b))
+        elif gt == "duel":
+            sc = sorted((p.score for p in playing), reverse=True)
+            if sc:
+                self._set_match_score("{} : {}".format(sc[0], sc[1] if len(sc) > 1 else 0))
+            else:
+                self._set_match_score(None)
+        else:
+            self._set_match_score(None)        
         tk.Label(self.scrollable_frame, text="Players", font=("Arial", 11, "bold"), bg=bg_color, fg=fg_color).pack(pady=(0,5))
         tk.Frame(self.scrollable_frame, height=1, bg="black").pack(fill="x", padx=5, pady=(0, 5))
 
@@ -210,35 +281,113 @@ class UIManager:
         self.root.update_idletasks() 
         self._bind_mouse_wheel_recursive(self.scrollable_frame) 
         self.player_canvas.configure(scrollregion=self.player_canvas.bbox("all"))
-        self.player_canvas.yview_moveto(0)
+        self.player_canvas.yview_moveto(prev_top)
 
     def _create_player_list_row(self, parent, player, is_spectator):
         bg_color = self.current_color_scheme["bg"]
         row_frame = tk.Frame(parent, bg=bg_color); row_frame.pack(fill="x", expand=True)
         row_frame.grid_columnconfigure(0, weight=1)
+        name_key = utils.normalize_name(player.name)
         name_widget = self.render_colored_name(row_frame, utils.truncate_text(player.name or "(anon)", config.MAX_PLAYER_NAME_CHARS))
         name_widget.grid(row=0, column=0, sticky="w", padx=2)
-        
-        row_frame.grid_columnconfigure(2, minsize=60)
-        
-        tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=1, sticky="ns", padx=5) 
-        
+
+        # Klick auf den Namen -> Steam-Profil. Nur wenn eine SteamID vorliegt
+        # (Bots und nicht getrackte Spieler haben keine).
+        steamid = self.last_steamid_by_name.get(name_key)
+        if steamid:
+            name_widget.configure(cursor="hand2")
+            name_widget.bind(
+                "<Button-1>",
+                lambda e, sid=steamid: webbrowser.open("https://steamcommunity.com/profiles/{}".format(sid)),
+            )
+
+        # --- Team-Farbe (qlstats): Quadrat links neben der ELO ---
+        # team 1 = rot, 2 = blau; frei/Spectator -> kein Quadrat.
+        team = self.last_team_by_name.get(name_key)
+        team_color = {1: "#e03030", 2: "#3565e0"}.get(team)
+
+        # --- ELO-Spalte (qlstats) ---
+        # Abgleich ueber den normalisierten Namen. Bots und Spieler mit < 5
+        # gewerteten Spielen liefern kein Rating -> "-".
+        elo = self.last_elo_by_name.get(name_key)
+        if elo is not None:
+            elo_text = str(elo)
+            elo_fg = utils.get_elo_color(elo, self.current_color_scheme["fg"])
+        else:
+            elo_text = "-"
+            elo_fg = "gray"
+
+        row_frame.grid_columnconfigure(1, minsize=14)
+        team_label = tk.Label(row_frame, text=("\u25a0" if team_color else ""),
+                              fg=(team_color or bg_color), bg=bg_color, font=("Arial", 9))
+        team_label.grid(row=0, column=1, padx=(0, 2))
+        tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=2, sticky="ns", padx=5)
+
+        # --- Score (A2S). Spectators haben keinen sinnvollen Score. ---
+        row_frame.grid_columnconfigure(3, minsize=34)
+        score_text = str(player.score) if not is_spectator else ""
+        score_label = tk.Label(row_frame, text=score_text, fg="gray", font=("Arial", 10), bg=bg_color)
+        score_label.grid(row=0, column=3, sticky="e", padx=2)
+        tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=4, sticky="ns", padx=5)
+        row_frame.grid_columnconfigure(5, minsize=46)
+        elo_label = tk.Label(row_frame, text=elo_text, fg=elo_fg, font=("Arial", 10, "bold"), bg=bg_color)
+        elo_label.grid(row=0, column=5, sticky="e", padx=2)
+
+        # --- Zeit-Spalte ---
+        row_frame.grid_columnconfigure(7, minsize=60)
+        tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=6, sticky="ns", padx=5)
         time_label = tk.Label(row_frame, text=utils.format_seconds(player.duration), fg="gray", font=("Arial", 10), bg=bg_color)
-        time_label.grid(row=0, column=2, padx=2)
-            
+        time_label.grid(row=0, column=7, padx=2)
+
         tk.Frame(parent, height=1, bg="black").pack(fill="x", padx=5, pady=2)
+
+    def set_server_elo_info(self, info):
+        """Setzt die ELO-Zusammenfassung im Info-Panel aus dem qlstats-
+        serverinfo-Block (Durchschnitt/Min/Max der getrackten Spieler).
+        info=None oder ohne Werte -> Platzhalter."""
+        self.last_server_info = info or {}
+        if not info:
+            self.elo_info_var.set("N/A")
+            return
+        rating = info.get("rating")
+        avg = info.get("avg")
+        lo = info.get("min")
+        hi = info.get("max")
+        suffix = " ({})".format(rating) if rating in ("A", "B") else ""
+        if avg:
+            text = "\u00d8 {}{}".format(avg, suffix)
+            if lo and hi:
+                text += "  \u00b7  {}\u2013{}".format(lo, hi)
+            self.elo_info_var.set(text)
+        else:
+            self.elo_info_var.set("N/A")
+
+    def _set_match_score(self, text):
+        """Zeigt/versteckt den Header-Spielstand. text=None -> ausblenden."""
+        if text:
+            self.score_var.set(text)
+            if not self.score_label.winfo_ismapped():
+                self.score_label.pack(anchor="w")
+        else:
+            self.score_var.set("")
+            self.score_label.pack_forget()
 
     def auto_adjust_window_geometry(self):
         self.root.update_idletasks()
-        
-        # KORREKTUR: Layout-Abfrage mit neuer Variablen
+
         if self.player_list_position_var.get() == "bottom":
             final_width = max(self.info_pane.winfo_reqwidth() + 20, 450)
-            final_height = self.info_pane.winfo_reqheight() + self.separator.winfo_reqheight() + 300 
+            final_height = self.info_pane.winfo_reqheight() + self.separator.winfo_reqheight() + 300
         else:
-            final_width = self.root.winfo_width() 
-            final_height = self.info_pane.winfo_reqheight() + 20 
-        
+            # Breite aus den tatsächlichen Pane-Anforderungen berechnen,
+            # statt die (evtl. veraltete) aktuelle Fensterbreite zu recyceln.
+            # So stimmt die Geometrie auch direkt nach einem Layout-Wechsel.
+            info_w = max(self.info_pane.winfo_reqwidth(), 350)
+            sep_w = self.separator.winfo_reqwidth()
+            player_w = max(self.player_pane.winfo_reqwidth(), 250)
+            final_width = info_w + sep_w + player_w + 30
+            final_height = self.info_pane.winfo_reqheight() + 20
+
         self.root.geometry(f"{final_width}x{final_height}")
 
     def apply_color_scheme(self, scheme_name):
@@ -273,7 +422,9 @@ class UIManager:
             }
             if widget_class in config_map: widget.configure(**config_map[widget_class])
             if hasattr(self, 'refresh_button') and widget == self.refresh_button: widget.configure(fg=active_scheme["fg"])
-            if hasattr(widget, 'is_hotkey_button'): widget.configure(bg=active_scheme["bg"], fg=active_scheme["accent"], activebackground=active_scheme["bg"], activeforeground=active_scheme["secondary"])
+            if getattr(widget, 'is_hotkey_button', False):
+                # Canvas-Hotkey-Button: über Neuzeichnen einfärben.
+                self._draw_hotkey_button(widget, str(widget.fav_index))
             if isinstance(widget, ttk.Separator): style = ttk.Style(); style.configure("Vertical.TSeparator", background="black"); style.configure("Horizontal.TSeparator", background="black")
         except tk.TclError: pass
         for child in widget.winfo_children(): self._apply_colors_recursive(child, scheme=scheme)
@@ -392,9 +543,42 @@ class UIManager:
         return tk.Button(parent, text=text, command=command, font=("Arial", 10, "bold"), relief="flat", padx=10, pady=5)
 
     def _create_hotkey_button(self, parent, text, command):
-        btn = tk.Button(parent, text=text, command=command, font=("Arial", 9, "bold"), relief="solid", borderwidth=1, padx=3, pady=1)
-        btn.is_hotkey_button = True
-        return btn
+        # Canvas-basierter Hotkey-Button: zeigt die Zahl, und bei leerem
+        # Favoriten-Slot ein schwarzes Kreuz über dem Kästchen.
+        size = 22
+        cv = tk.Canvas(parent, width=size, height=size, highlightthickness=1,
+                       highlightbackground="#000000", cursor="hand2")
+        cv.is_hotkey_button = True
+        cv.fav_index = int(text)
+        cv.bind("<Button-1>", lambda e: command())
+        self._draw_hotkey_button(cv, text)
+        return cv
+
+    def _draw_hotkey_button(self, cv, text):
+        size = 22
+        cv.delete("all")
+        scheme = self.current_color_scheme
+        bg = scheme["bg"] if scheme else "#1a1a1a"
+        accent = scheme["accent"] if scheme else "#00ff88"
+        cv.configure(bg=bg)
+        # Zahl
+        cv.create_text(size // 2, size // 2, text=text, fill=accent,
+                       font=("Arial", 9, "bold"))
+        # Bei nicht vergebenem Favoriten ein schwarzes X darüberlegen
+        idx = getattr(cv, "fav_index", None)
+        if idx is not None:
+            addr = self.app.favorites.get(str(idx), "")
+            if not addr or not addr.strip():
+                cv.create_line(3, 3, size - 3, size - 3, fill="#000000", width=2)
+                cv.create_line(size - 3, 3, 3, size - 3, fill="#000000", width=2)
+
+    def refresh_hotkey_buttons(self):
+        # Zeichnet alle Hotkey-Buttons neu (z.B. nach Speichern von Favoriten).
+        if not hasattr(self, 'hotkeys_button_frame'):
+            return
+        for child in self.hotkeys_button_frame.winfo_children():
+            if getattr(child, 'is_hotkey_button', False):
+                self._draw_hotkey_button(child, str(child.fav_index))
 
     def toggle_hotkeys(self):
         should_show = self.show_hotkeys_var.get()
@@ -415,8 +599,13 @@ class UIManager:
         
         self.options_window = tk.Toplevel(self.root)
         self.options_window.title("Options"); self.options_window.transient(self.root); self.options_window.resizable(False, False)
+
+        # Ursprüngliches Schema merken, um es bei Schließen ohne Speichern
+        # wiederherzustellen (sonst bleibt die Live-Vorschau aktiv).
+        original_scheme_name = self.app.app_config.get("color_scheme", "Dark1")
+        saved_flag = {"done": False}
         
-        options_width, options_height = 500, 560 
+        options_width, options_height = 500, 540
         self.root.update_idletasks()
         main_x, main_y = self.root.winfo_x(), self.root.winfo_y()
         main_width, main_height = self.root.winfo_width(), self.root.winfo_height()
@@ -443,8 +632,8 @@ class UIManager:
                 # Favorit 1 ist immer der Hauptserver
                 self.app.favorites["1"] = ip_port_str
 
-                # 2. Speicherung der Favoriten 2-6
-                for i in range(2, 7):
+                # 2. Speicherung der Favoriten 2-7
+                for i in range(2, 8):
                     self.app.favorites[str(i)] = fav_entries[str(i)].get().strip()
                 
                 # 3. Speicherung der App-Konfiguration (Farbe, Hotkeys, Layout, etc.)
@@ -458,14 +647,24 @@ class UIManager:
 
                 utils.save_app_config(self.app)
                 utils.save_favorites(self.app.favorites)
-                
+
+                self.refresh_hotkey_buttons()
                 self._arrange_panes()
                 self.app.server_handler.manual_refresh()
+                saved_flag["done"] = True
                 self.options_window.destroy()
             except Exception as e:
                 messagebox.showerror("Error", f"Invalid settings: {e}", parent=self.options_window)
         
         tk.Button(main_frame, text="Save & Close", command=save_and_close).pack(side="bottom", pady=5)
+
+        def on_close_without_save():
+            # Wenn ohne Speichern geschlossen wird, Live-Vorschau zurücksetzen.
+            if not saved_flag["done"]:
+                self.apply_color_scheme(original_scheme_name)
+            self.options_window.destroy()
+
+        self.options_window.protocol("WM_DELETE_WINDOW", on_close_without_save)
 
         notebook = ttk.Notebook(main_frame); notebook.pack(fill="both", expand=True, pady=(0, 5)) 
         
@@ -481,7 +680,7 @@ class UIManager:
         # Favorit 1 ist gleichzeitig der Hauptserver, der angezeigt wird.
         fav_outer = tk.LabelFrame(general_tab, text="Server Favorites (1 = main server)", padx=10, pady=10); fav_outer.pack(fill="x", pady=5)
         current_ip_port_str = f"{self.app.main_server_address_setting[0]}:{self.app.main_server_address_setting[1]}"
-        for i in range(1, 7):
+        for i in range(1, 8):
             fav_frame = tk.Frame(fav_outer)
             fav_frame.pack(fill="x", pady=2)
             tk.Label(fav_frame, text=f"Favorite {i} (IP:Port):", width=16, anchor="w").pack(side="left")
@@ -513,8 +712,6 @@ class UIManager:
                        text="Player list below server info (Stacked)", 
                        variable=self.player_list_position_var, 
                        value="bottom").pack(anchor="w")
-                       
-        tk.Label(layout_frame, text="(Requires restart to apply layout changes fully)", font=("Arial", 8, "italic")).pack(anchor="w", padx=5, pady=(5,0))
 
 
         color_frame = tk.LabelFrame(appearance_tab, text="Color Scheme", padx=10, pady=10); color_frame.pack(fill="x", pady=5)
@@ -527,6 +724,7 @@ class UIManager:
 
         for i, name in enumerate(config.COLOR_SCHEMES.keys()):
             tk.Radiobutton(color_frame, text=name, variable=color_var, value=name, command=on_color_change).grid(row=i//4, column=i%4, sticky="w")
+
 
         # Options-Fenster bewusst NICHT einfaerben: es behaelt das neutrale
         # Standard-Design (grauer Hintergrund, schwarze Schrift), unabhaengig

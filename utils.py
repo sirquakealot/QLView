@@ -5,13 +5,6 @@ import re
 import configparser
 import json
 import config
-import atexit 
-
-# Nur für Windows-Registry-Zugriff:
-try:
-    import winreg
-except ImportError:
-    winreg = None 
 
 # Neue Windows-spezifische Importe für die Verknüpfung
 if sys.platform == "win32":
@@ -47,23 +40,54 @@ def format_seconds(secs):
     mins = int((secs % 3600) // 60)
     return f"{hours}:{mins:02d}h" if hours > 0 else f"{mins}m"
 
-def get_ping_color(ping_ms):
-    if ping_ms < 50: 
-        return "#00ff00"
-    elif ping_ms < 100: 
-        return "#ffff00"
-    elif ping_ms < 200: 
-        return "#ff8000"
-    else: 
-        return "#ff0000"
+def strip_quake_colors(name):
+    """Entfernt Quake-Farbcodes (^0-^9) aus einem Namen. ^^ wird zu ^."""
+    if not name:
+        return ""
+    out = []
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        if ch == '^' and i + 1 < n:
+            nxt = name[i + 1]
+            if nxt == '^':
+                out.append('^')
+                i += 2
+                continue
+            elif nxt.isdigit():
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+def normalize_name(name):
+    """Vergleichsschlüssel für den Abgleich A2S-Name <-> qlstats-Name."""
+    return strip_quake_colors(name).replace('\x00', '').strip().lower()
+
+def get_elo_color(elo, default="#ffffff"):
+    """Farbe für einen ELO-Wert. Schwellen sind grob an QL-CA angelehnt."""
+    if elo is None:
+        return default
+    if elo >= 2000:
+        return "#ff4500"   # Spitze
+    elif elo >= 1700:
+        return "#ffa500"   # stark
+    elif elo >= 1400:
+        return "#00ff00"   # überdurchschnittlich
+    elif elo >= 1100:
+        return default     # Durchschnitt
+    else:
+        return "#9e9e9e"   # niedrig
 
 def load_favorites():
-    default_favs = {str(i): "" for i in range(1, 7)}
+    default_favs = {str(i): "" for i in range(1, 8)}
     if os.path.exists(config.FAVORITES_FILE):
         try:
             with open(config.FAVORITES_FILE, 'r') as f:
                 favorites = json.load(f)
-            for i in range(1, 7):
+            for i in range(1, 8):
                 if str(i) not in favorites: 
                     favorites[str(i)] = ""
             return favorites
@@ -88,7 +112,7 @@ def load_app_config():
         "start_minimized": False,
         "start_with_system": False,
         "color_scheme": "Dark1",
-        "player_list_position": "right"
+        "player_list_position": "right",
     }
     parser = configparser.ConfigParser(interpolation=None)
     
@@ -103,7 +127,7 @@ def load_app_config():
         app_cfg["start_minimized"] = parser.getboolean("settings", "start_minimized", fallback=False)
         app_cfg["start_with_system"] = parser.getboolean("settings", "start_with_system", fallback=False)
         app_cfg["color_scheme"] = parser.get("settings", "color_scheme", fallback="Dark1")
-        
+
         # LOGIK FÜR DIE PLAYER-LISTE (Konvertierung/Laden)
         new_position = parser.get("settings", "player_list_position", fallback=None)
         
@@ -228,7 +252,7 @@ def save_app_config(app):
     
     scheme_name = next((name for name, scheme in config.COLOR_SCHEMES.items() if scheme == app.ui.current_color_scheme), "Dark1")
     parser.set("settings", "color_scheme", scheme_name)
-    
+
     try:
         with open(config.CONFIG_FILE, "w") as f: 
             parser.write(f)

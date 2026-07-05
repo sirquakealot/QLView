@@ -15,12 +15,18 @@ DEFAULT_REFRESH_INTERVAL = 10
 # Wird von main.py genutzt, um dem Server beizutreten (Steam-Protokoll).
 CONNECT_COMMAND = "steam://connect/{ip}:{port}"
 
+# --- QLStats ELO API ---
+# Öffentlicher, CORS-freigegebener Endpunkt des qlstats-Feeders.
+# /server/<ip>:<port>/players liefert die aktuell verbundenen Spieler inkl.
+# steamid, name, team und rating. Das rating ist je nach Server-Factory
+# automatisch das A- oder B-Rating: für Vampiric PQL CA ist es das B-Rating.
+QLSTATS_API_BASE = "https://qlstats.net/api"
+QLSTATS_TIMEOUT = 4.0
+SHOW_ELO = True
+
 # --- UI Layout Constants ---
 MAX_SERVER_MAP_NAME_CHARS = 256
 MAX_PLAYER_NAME_CHARS = 64
-MIN_AUTO_WIDTH = 720 
-MIN_WINDOW_HEIGHT = 1 
-PLAYER_LIST_ON_RIGHT = True
 
 # --- Color Schemes ---
 COLOR_SCHEMES = {

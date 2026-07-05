@@ -4,8 +4,6 @@ import os
 import pystray
 from PIL import Image, ImageTk 
 import threading
-import socket 
-import time
 
 # Importe deiner lokalen Dateien
 import config
@@ -76,23 +74,26 @@ class QLViewApp:
         try:
             icon_path = utils.resource_path("quake3.ico")
             icon_image = Image.open(icon_path)
-            
-            def toggle_window(icon, item):
-                if self.root.winfo_viewable():
-                    self.root.withdraw() 
-                else:
-                    self.show_window_from_tray() 
+
+            # WICHTIG: pystray-Menü-Callbacks laufen im Tray-Thread, NICHT im
+            # Tkinter-Hauptthread. Direkte Tk-Aufrufe von dort (withdraw,
+            # deiconify, StringVar.set, messagebox, after_cancel) sind nicht
+            # thread-sicher und können sporadische Hänger/Abstürze verursachen.
+            # Deshalb wird jede Aktion über root.after(0, ...) in den Hauptthread
+            # eingereiht.
+            def on_main(func):
+                return lambda icon=None, item=None: self.root.after(0, func)
 
             self.tray_icon = pystray.Icon(
                 'Quake Server Viewer', 
                 icon=icon_image, 
                 title=config.APP_NAME,
                 menu=pystray.Menu(
-                    pystray.MenuItem('Show/Hide', toggle_window, default=True), 
-                    pystray.MenuItem('Refresh', self.server_handler.manual_refresh),
-                    pystray.MenuItem('Connect', self.connect_to_server),
+                    pystray.MenuItem('Show/Hide', on_main(self.toggle_window_main), default=True), 
+                    pystray.MenuItem('Refresh', on_main(self.server_handler.manual_refresh)),
+                    pystray.MenuItem('Connect', on_main(self.connect_to_server)),
                     pystray.Menu.SEPARATOR,
-                    pystray.MenuItem('Exit', self.cleanup)
+                    pystray.MenuItem('Exit', on_main(self.cleanup))
                 )
             )
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
@@ -100,6 +101,13 @@ class QLViewApp:
         except Exception as e:
             print(f"Error setting up tray icon: {e}")
             self.tray_icon = None
+
+    def toggle_window_main(self):
+        # Läuft im Hauptthread (über root.after eingereiht).
+        if self.root.winfo_viewable():
+            self.root.withdraw()
+        else:
+            self.show_window_from_tray()
 
     def show_window_from_tray(self, icon=None, item=None):
         if self.root.winfo_exists():
