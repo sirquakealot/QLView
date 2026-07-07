@@ -63,8 +63,15 @@ def strip_quake_colors(name):
     return ''.join(out)
 
 def normalize_name(name):
-    """Vergleichsschlüssel für den Abgleich A2S-Name <-> qlstats-Name."""
-    return strip_quake_colors(name).replace('\x00', '').strip().lower()
+    """Vergleichsschlüssel für den Abgleich A2S-Name <-> qlstats-Name.
+    QL liefert in der A2S-Abfrage die Zeichen ' " < > sowie Doppel-Leerzeichen,
+    die im ZMQ-Namen (Basis der qlstats-Daten) fehlen. Beide Seiten werden hier
+    identisch bereinigt, damit z.B. <LoremIpsum> oder ANDY'S LANDLORD matchen."""
+    s = strip_quake_colors(name).replace('\x00', '')
+    for ch in "'\"<>":
+        s = s.replace(ch, '')
+    s = re.sub(r'\s{2,}', ' ', s)
+    return s.strip().lower()
 
 def get_elo_color(elo, default="#ffffff"):
     """Farbe für einen ELO-Wert. Schwellen sind grob an QL-CA angelehnt."""

@@ -2,6 +2,7 @@
 from tkinter import ttk, messagebox
 import os
 import webbrowser
+import urllib.parse
 from PIL import Image, ImageTk
 import utils
 import config
@@ -291,15 +292,17 @@ class UIManager:
         name_widget = self.render_colored_name(row_frame, utils.truncate_text(player.name or "(anon)", config.MAX_PLAYER_NAME_CHARS))
         name_widget.grid(row=0, column=0, sticky="w", padx=2)
 
-        # Klick auf den Namen -> Steam-Profil. Nur wenn eine SteamID vorliegt
-        # (Bots und nicht getrackte Spieler haben keine).
-        steamid = self.last_steamid_by_name.get(name_key)
-        if steamid:
+        # Klick auf den Namen -> Steam. Mit SteamID direkt aufs Profil, ohne
+        # (keine qlstats-Daten) auf die Steam-Namenssuche. Bots ausgenommen.
+        if player.name not in config.BOT_NAMES:
+            steamid = self.last_steamid_by_name.get(name_key)
+            if steamid:
+                url = "https://steamcommunity.com/profiles/{}".format(steamid)
+            else:
+                q = urllib.parse.quote(utils.strip_quake_colors(player.name or ""))
+                url = "https://steamcommunity.com/search/users/#text=" + q
             name_widget.configure(cursor="hand2")
-            name_widget.bind(
-                "<Button-1>",
-                lambda e, sid=steamid: webbrowser.open("https://steamcommunity.com/profiles/{}".format(sid)),
-            )
+            name_widget.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
 
         # --- Team-Farbe (qlstats): Quadrat links neben der ELO ---
         # team 1 = rot, 2 = blau; frei/Spectator -> kein Quadrat.

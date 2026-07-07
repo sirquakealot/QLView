@@ -119,6 +119,20 @@ class ServerHandler:
             # ELO vom qlstats-Feeder (Netzwerk-Call gehört in den Worker-Thread).
             elo_by_name, steamid_by_name, team_by_name, elo_info = self.fetch_qlstats_players(address)
 
+            # Gamestate aus den A2S-Rules (g_gameState). Manche Server liefern
+            # keine Rules -> leer lassen.
+            gamestate = ""
+            try:
+                rules = a2s.rules(address, timeout=1.5)
+                raw = rules.get("g_gameState", "")
+                gamestate = {
+                    "PRE_GAME": "WARMUP",
+                    "COUNT_DOWN": "COUNTDOWN",
+                    "IN_PROGRESS": "LIVE",
+                }.get(raw, raw)
+            except Exception:
+                gamestate = ""
+
             result = {
                 "ok": True,
                 "server_name": info.server_name,
@@ -133,6 +147,7 @@ class ServerHandler:
                 "steamid_by_name": steamid_by_name,
                 "team_by_name": team_by_name,
                 "elo_info": elo_info,
+                "gamestate": gamestate,
             }
         except (socket.timeout, ConnectionRefusedError, socket.gaierror):
             result = {"ok": False, "msg": "Connection failed."}
@@ -159,9 +174,9 @@ class ServerHandler:
             ui.server_name_var.set(
                 utils.truncate_text(result["server_name"], config.MAX_SERVER_MAP_NAME_CHARS)
             )
-            ui.map_name_var.set(
-                utils.truncate_text(result["map_name"], config.MAX_SERVER_MAP_NAME_CHARS)
-            )
+            _map = utils.truncate_text(result["map_name"], config.MAX_SERVER_MAP_NAME_CHARS)
+            _state = result.get("gamestate")
+            ui.map_name_var.set("{} / {}".format(_map, _state) if _state else _map)
             ui.player_count_var.set(f"{result['player_count']}/{result['max_players']}")
             ui.ip_label_var.set(f"{result['address'][0]}:{result['address'][1]}")
             ui.ping_var.set(f"{result['ping_ms']}ms")
