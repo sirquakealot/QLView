@@ -2,7 +2,6 @@
 from tkinter import ttk, messagebox
 import os
 import webbrowser
-import urllib.parse
 from PIL import Image, ImageTk
 import utils
 import config
@@ -25,6 +24,9 @@ class UIManager:
         self.game_type_var = tk.StringVar(value="...")
         self.elo_info_var = tk.StringVar(value="...")
         self.error_message_var = tk.StringVar()
+        # Bausteine der ELO-Zeile (eigene ELO + Server-Durchschnitt).
+        self._own_elo_val = None
+        self._server_elo_summary = None
 
         # ELO-Zustand: zuletzt empfangene Name->Rating-Zuordnung, damit ein
         # Schema-Wechsel (Neuzeichnen mit alter Liste) die ELOs behält.
@@ -34,6 +36,9 @@ class UIManager:
         self.last_server_info = {}
         
         # Einstellungen Variablen
+        self.own_steamid_var = tk.StringVar(value=self.app.app_config.get("own_steamid", ""))
+        self.own_gametype_var = tk.StringVar(value=self.app.app_config.get("own_gametype", "ca"))
+        self.own_rating_var = tk.StringVar(value=self.app.app_config.get("own_rating", "B"))
         self.show_hotkeys_var = tk.BooleanVar(value=self.app.app_config.get("show_hotkeys", True))
         self.start_minimized_var = tk.BooleanVar(value=self.app.app_config.get("start_minimized", False))
         self.start_with_system_var = tk.BooleanVar(value=self.app.app_config.get("start_with_system", False))
@@ -131,7 +136,11 @@ class UIManager:
         self.stats_container.grid(row=0, column=2, sticky="nsw", padx=(5, 0))
         self.score_var = tk.StringVar(value="")
         self.score_label = tk.Label(self.stats_container, textvariable=self.score_var, font=("Arial", 12, "bold"))
-        self.score_label.pack(anchor="w")
+        self.gamestate_var = tk.StringVar(value="")
+        self.gamestate_label = tk.Label(self.stats_container, textvariable=self.gamestate_var, font=("Arial", 11, "bold"))
+        # Score oben, Gamestate darunter -> Reihenfolge macht _render_header_stats.
+        self._score_text = ""
+        self._gamestate_text = ""
 
         self.toggle_hotkeys() 
 
@@ -220,6 +229,19 @@ class UIManager:
         bg_color = self.current_color_scheme["bg"]; fg_color = self.current_color_scheme["fg"]
         self.scrollable_frame.configure(bg=bg_color)
 
+        # Ghost-Player rausfiltern: QL haelt manchmal Karteileichen in der
+        # Liste (Score 0, seit >1h "verbunden"), die nicht wirklich drauf sind.
+        # Ein echter (auch stundenlanger) Spectator ist von qlstats getrackt und
+        # hat eine SteamID -> nur qlstats-UNBEKANNTE Score-0-Leichen fliegen raus.
+        # Ohne qlstats-Daten wird gar nicht gefiltert.
+        has_qlstats = bool(self.last_steamid_by_name)
+        def is_ghost(p):
+            if p.name in config.BOT_NAMES or not has_qlstats:
+                return False
+            known = utils.normalize_name(p.name) in self.last_steamid_by_name
+            return (not known) and p.score <= 0 and p.duration >= 3600
+        players = [p for p in players if not is_ghost(p)]
+
         # Spectator-Erkennung ueber das qlstats-Team (zuverlaessig; der
         # A2S-Score ist bei QL unbrauchbar). team -1 oder >=3 = Spectator,
         # 0/1/2 = aktiv. Ohne qlstats-Daten Fallback auf A2S-Score < 0.
@@ -292,17 +314,16 @@ class UIManager:
         name_widget = self.render_colored_name(row_frame, utils.truncate_text(player.name or "(anon)", config.MAX_PLAYER_NAME_CHARS))
         name_widget.grid(row=0, column=0, sticky="w", padx=2)
 
-        # Klick auf den Namen -> Steam. Mit SteamID direkt aufs Profil, ohne
-        # (keine qlstats-Daten) auf die Steam-Namenssuche. Bots ausgenommen.
+        # Klick auf den Namen -> Steam-Profil. Nur mit echter SteamID (qlstats).
+        # Ohne SteamID und bei Bots kein Link.
         if player.name not in config.BOT_NAMES:
             steamid = self.last_steamid_by_name.get(name_key)
             if steamid:
-                url = "https://steamcommunity.com/profiles/{}".format(steamid)
-            else:
-                q = urllib.parse.quote(utils.strip_quake_colors(player.name or ""))
-                url = "https://steamcommunity.com/search/users/#text=" + q
-            name_widget.configure(cursor="hand2")
-            name_widget.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+                name_widget.configure(cursor="hand2")
+                name_widget.bind(
+                    "<Button-1>",
+                    lambda e, sid=steamid: webbrowser.open("https://steamcommunity.com/profiles/{}".format(sid)),
+                )
 
         # --- Team-Farbe (qlstats): Quadrat links neben der ELO ---
         # team 1 = rot, 2 = blau; frei/Spectator -> kein Quadrat.
@@ -345,35 +366,60 @@ class UIManager:
         tk.Frame(parent, height=1, bg="black").pack(fill="x", padx=5, pady=2)
 
     def set_server_elo_info(self, info):
-        """Setzt die ELO-Zusammenfassung im Info-Panel aus dem qlstats-
-        serverinfo-Block (Durchschnitt/Min/Max der getrackten Spieler).
-        info=None oder ohne Werte -> Platzhalter."""
+        """Server-Durchschnitt (Ø/Min/Max) als hinterer Teil der ELO-Zeile.
+        info=None oder ohne Werte -> kein Durchschnitt."""
         self.last_server_info = info or {}
-        if not info:
-            self.elo_info_var.set("N/A")
-            return
-        rating = info.get("rating")
-        avg = info.get("avg")
-        lo = info.get("min")
-        hi = info.get("max")
-        suffix = " ({})".format(rating) if rating in ("A", "B") else ""
-        if avg:
-            text = "\u00d8 {}{}".format(avg, suffix)
-            if lo and hi:
-                text += "  \u00b7  {}\u2013{}".format(lo, hi)
-            self.elo_info_var.set(text)
-        else:
-            self.elo_info_var.set("N/A")
+        summary = None
+        if info:
+            rating = info.get("rating")
+            avg = info.get("avg")
+            lo = info.get("min")
+            hi = info.get("max")
+            suffix = " ({})".format(rating) if rating in ("A", "B") else ""
+            if avg:
+                summary = "\u00d8 {}{}".format(avg, suffix)
+                if lo and hi:
+                    summary += "  \u00b7  {}\u2013{}".format(lo, hi)
+        self._server_elo_summary = summary
+        self._render_elo_line()
+
+    def set_own_elo(self, val):
+        """Eigene ELO als vorderer Teil der ELO-Zeile. val=(elo, games) oder
+        None (keine ID / keine Wertung) -> wird weggelassen."""
+        self._own_elo_val = val[0] if val else None
+        self._render_elo_line()
+
+    def _render_elo_line(self):
+        """Baut die ELO-Zeile: '<eigene>  ·  Ø <avg> (B)  ·  <min>–<max>'.
+        Ohne eigene ELO nur der Durchschnitt; ohne beides 'N/A'."""
+        parts = []
+        if self._own_elo_val is not None:
+            parts.append(str(self._own_elo_val))
+        if self._server_elo_summary:
+            parts.append(self._server_elo_summary)
+        self.elo_info_var.set("  \u00b7  ".join(parts) if parts else "N/A")
+
+    def set_gamestate(self, raw):
+        """Setzt den Gamestate-Text unter dem Score (leer -> ausblenden)."""
+        self._gamestate_text = raw or ""
+        self._render_header_stats()
 
     def _set_match_score(self, text):
-        """Zeigt/versteckt den Header-Spielstand. text=None -> ausblenden."""
-        if text:
-            self.score_var.set(text)
-            if not self.score_label.winfo_ismapped():
-                self.score_label.pack(anchor="w")
-        else:
-            self.score_var.set("")
-            self.score_label.pack_forget()
+        """Setzt den Header-Spielstand (None/'' -> ausblenden)."""
+        self._score_text = text or ""
+        self._render_header_stats()
+
+    def _render_header_stats(self):
+        """Score oben, Gamestate darunter. Fehlt der Score (z.B. FFA), rutscht
+        der Gamestate an dessen Stelle nach oben."""
+        self.score_label.pack_forget()
+        self.gamestate_label.pack_forget()
+        if self._score_text:
+            self.score_var.set(self._score_text)
+            self.score_label.pack(anchor="w")
+        if self._gamestate_text:
+            self.gamestate_var.set(self._gamestate_text)
+            self.gamestate_label.pack(anchor="w")
 
     def auto_adjust_window_geometry(self):
         self.root.update_idletasks()
@@ -557,18 +603,32 @@ class UIManager:
         self._draw_hotkey_button(cv, text)
         return cv
 
+    def _is_active_fav(self, idx):
+        """True, wenn der Favorit idx dem aktuell angezeigten Server entspricht."""
+        try:
+            addr_str = self.app.favorites.get(str(idx), "")
+            if not addr_str or not addr_str.strip():
+                return False
+            return tuple(utils.parse_address(addr_str)) == tuple(self.app.SERVER_ADDRESS)
+        except Exception:
+            return False
+
     def _draw_hotkey_button(self, cv, text):
         size = 22
         cv.delete("all")
         scheme = self.current_color_scheme
         bg = scheme["bg"] if scheme else "#1a1a1a"
         accent = scheme["accent"] if scheme else "#00ff88"
-        cv.configure(bg=bg)
+        idx = getattr(cv, "fav_index", None)
+        # Aktiven Server-Button invertiert hervorheben (Akzent als Hintergrund).
+        active = idx is not None and self._is_active_fav(idx)
+        btn_bg = accent if active else bg
+        txt_fill = bg if active else accent
+        cv.configure(bg=btn_bg, highlightbackground=(accent if active else "#000000"))
         # Zahl
-        cv.create_text(size // 2, size // 2, text=text, fill=accent,
+        cv.create_text(size // 2, size // 2, text=text, fill=txt_fill,
                        font=("Arial", 9, "bold"))
         # Bei nicht vergebenem Favoriten ein schwarzes X darüberlegen
-        idx = getattr(cv, "fav_index", None)
         if idx is not None:
             addr = self.app.favorites.get(str(idx), "")
             if not addr or not addr.strip():
@@ -608,7 +668,7 @@ class UIManager:
         original_scheme_name = self.app.app_config.get("color_scheme", "Dark1")
         saved_flag = {"done": False}
         
-        options_width, options_height = 500, 540
+        options_width, options_height = 500, 630
         self.root.update_idletasks()
         main_x, main_y = self.root.winfo_x(), self.root.winfo_y()
         main_width, main_height = self.root.winfo_width(), self.root.winfo_height()
@@ -647,6 +707,9 @@ class UIManager:
                 
                 # KORREKTUR: Speichert die neue String-Variable
                 self.app.app_config["player_list_position"] = self.player_list_position_var.get()
+                self.app.app_config["own_steamid"] = self.own_steamid_var.get().strip()
+                self.app.app_config["own_gametype"] = self.own_gametype_var.get()
+                self.app.app_config["own_rating"] = self.own_rating_var.get()
 
                 utils.save_app_config(self.app)
                 utils.save_favorites(self.app.favorites)
@@ -678,6 +741,12 @@ class UIManager:
         interval_frame = tk.LabelFrame(general_tab, text="General Settings", padx=10, pady=10); interval_frame.pack(fill="x", pady=5)
         tk.Label(interval_frame, text="Update interval (seconds)").pack(anchor="w")
         entry_interval = tk.Entry(interval_frame, width=10); entry_interval.insert(0, str(self.app.REFRESH_INTERVAL)); entry_interval.pack(anchor="w", pady=(0,5))
+        tk.Label(interval_frame, text="Your SteamID64 (for \"Own\" ELO)").pack(anchor="w")
+        tk.Entry(interval_frame, width=22, textvariable=self.own_steamid_var).pack(anchor="w", pady=(0,5))
+        own_row = tk.Frame(interval_frame); own_row.pack(anchor="w", pady=(0,5))
+        tk.Label(own_row, text="\"Own\" ELO mode:").pack(side="left")
+        tk.OptionMenu(own_row, self.own_gametype_var, *["duel","ffa","ca","tdm","ctf","ft","ad"]).pack(side="left", padx=(5,0))
+        tk.OptionMenu(own_row, self.own_rating_var, *["A","B"]).pack(side="left", padx=(5,0))
 
         # Server-Favoriten 1-6 als gleichwertige Liste.
         # Favorit 1 ist gleichzeitig der Hauptserver, der angezeigt wird.

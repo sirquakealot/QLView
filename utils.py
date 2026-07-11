@@ -120,6 +120,9 @@ def load_app_config():
         "start_with_system": False,
         "color_scheme": "Dark1",
         "player_list_position": "right",
+        "own_steamid": "",
+        "own_gametype": "ca",
+        "own_rating": "B",
     }
     parser = configparser.ConfigParser(interpolation=None)
     
@@ -134,6 +137,9 @@ def load_app_config():
         app_cfg["start_minimized"] = parser.getboolean("settings", "start_minimized", fallback=False)
         app_cfg["start_with_system"] = parser.getboolean("settings", "start_with_system", fallback=False)
         app_cfg["color_scheme"] = parser.get("settings", "color_scheme", fallback="Dark1")
+        app_cfg["own_steamid"] = parser.get("settings", "own_steamid", fallback="")
+        app_cfg["own_gametype"] = parser.get("settings", "own_gametype", fallback="ca")
+        app_cfg["own_rating"] = parser.get("settings", "own_rating", fallback="B")
 
         # LOGIK FÜR DIE PLAYER-LISTE (Konvertierung/Laden)
         new_position = parser.get("settings", "player_list_position", fallback=None)
@@ -259,6 +265,9 @@ def save_app_config(app):
     
     scheme_name = next((name for name, scheme in config.COLOR_SCHEMES.items() if scheme == app.ui.current_color_scheme), "Dark1")
     parser.set("settings", "color_scheme", scheme_name)
+    parser.set("settings", "own_steamid", app.app_config.get("own_steamid", ""))
+    parser.set("settings", "own_gametype", app.app_config.get("own_gametype", "ca"))
+    parser.set("settings", "own_rating", app.app_config.get("own_rating", "B"))
 
     try:
         with open(config.CONFIG_FILE, "w") as f: 

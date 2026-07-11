@@ -105,9 +105,43 @@ class ServerHandler:
             target=self._query_worker, args=(query_id, address), daemon=True
         ).start()
 
+    def fetch_own_elo(self):
+        """Eigene ELO per SteamID aus den Optionen, unabhaengig davon ob man
+        gerade auf dem Server ist. Gamemode und A/B-Rating kommen ebenfalls aus
+        den Optionen (Route /elo bzw. /elo_b). Gibt (elo, games) oder None
+        (keine ID, 0 Spiele, Fehler)."""
+        steamid = str(self.app.app_config.get("own_steamid", "")).strip()
+        if not steamid.isdigit() or not getattr(config, "SHOW_ELO", True):
+            return None
+        gt = str(self.app.app_config.get("own_gametype", "ca")).lower()
+        rating = str(self.app.app_config.get("own_rating", "B")).upper()
+        route = "elo_b" if rating == "B" else "elo"
+        # /elo und /elo_b liegen im Root (xonstat), NICHT unter /api (Feeder).
+        base = config.QLSTATS_API_BASE.rstrip("/")
+        site = base[:-4] if base.endswith("/api") else base
+        url = "{site}/{route}/{sid}".format(site=site, route=route, sid=steamid)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": config.APP_NAME})
+            with urllib.request.urlopen(req, timeout=config.QLSTATS_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:
+            return None
+        players = data.get("players") or []
+        if not players:
+            return None
+        entry = (players[0] or {}).get(gt) or {}
+        elo = entry.get("elo")
+        games = entry.get("games", 0)
+        if elo is None or not games:   # 0 gewertete Spiele -> ungewertet
+            return None
+        return (int(elo), int(games))
+
     def _query_worker(self, query_id, address):
         """Läuft im Hintergrund-Thread. KEINE Tkinter-Zugriffe hier!"""
         result = {"ok": False}
+        # Eigene ELO unabhaengig vom Server-Ergebnis (zeigt sie auch, wenn der
+        # getrackte Server gerade down ist).
+        own_elo = self.fetch_own_elo()
         try:
             info = a2s.info(address, timeout=5.0)
             ping_ms = self.measure_ping(address, timeout=1.5)
@@ -125,11 +159,10 @@ class ServerHandler:
             try:
                 rules = a2s.rules(address, timeout=1.5)
                 raw = rules.get("g_gameState", "")
-                gamestate = {
-                    "PRE_GAME": "WARMUP",
-                    "COUNT_DOWN": "COUNTDOWN",
-                    "IN_PROGRESS": "LIVE",
-                }.get(raw, raw)
+                if raw == "IN_PROGRESS":
+                    gamestate = "Active"
+                elif raw:
+                    gamestate = "Warmup"
             except Exception:
                 gamestate = ""
 
@@ -148,11 +181,12 @@ class ServerHandler:
                 "team_by_name": team_by_name,
                 "elo_info": elo_info,
                 "gamestate": gamestate,
+                "own_elo": own_elo,
             }
         except (socket.timeout, ConnectionRefusedError, socket.gaierror):
-            result = {"ok": False, "msg": "Connection failed."}
+            result = {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
         except Exception:
-            result = {"ok": False, "msg": "Error."}
+            result = {"ok": False, "msg": "Error.", "own_elo": own_elo}
 
         # Ergebnis zurück in den Hauptthread geben
         root = self.app.root
@@ -174,9 +208,10 @@ class ServerHandler:
             ui.server_name_var.set(
                 utils.truncate_text(result["server_name"], config.MAX_SERVER_MAP_NAME_CHARS)
             )
-            _map = utils.truncate_text(result["map_name"], config.MAX_SERVER_MAP_NAME_CHARS)
-            _state = result.get("gamestate")
-            ui.map_name_var.set("{} / {}".format(_map, _state) if _state else _map)
+            ui.map_name_var.set(
+                utils.truncate_text(result["map_name"], config.MAX_SERVER_MAP_NAME_CHARS)
+            )
+            ui.set_gamestate(result.get("gamestate"))
             ui.player_count_var.set(f"{result['player_count']}/{result['max_players']}")
             ui.ip_label_var.set(f"{result['address'][0]}:{result['address'][1]}")
             ui.ping_var.set(f"{result['ping_ms']}ms")
@@ -188,6 +223,7 @@ class ServerHandler:
             ui.game_type_var.set(result["game"])
             ui.update_map_preview(result["map_name"])
             ui.set_server_elo_info(result.get("elo_info"))
+            ui.set_own_elo(result.get("own_elo"))
             ui.update_player_list(
                 result["players"],
                 elo_by_name=result.get("elo_by_name", {}),
@@ -207,6 +243,10 @@ class ServerHandler:
                 )
         else:
             self.handle_connection_error(result.get("msg", "Error."))
+            ui.set_own_elo(result.get("own_elo"))
+
+        # Aktiven Favoriten-Button markieren (Server kann gewechselt haben).
+        ui.refresh_hotkey_buttons()
 
         # Nächste Abfrage planen (immer im Hauptthread)
         if self.app.root and self.app.root.winfo_exists() and not self.app.shutting_down:
@@ -220,6 +260,7 @@ class ServerHandler:
         ui.ping_var.set("N/A")
         ui.server_name_var.set("Connection failed")
         ui.map_name_var.set("N/A")
+        ui.set_gamestate("")
         ui.ip_label_var.set("N/A")
         ui.game_type_var.set("N/A")
         ui.set_server_elo_info(None)
@@ -246,6 +287,7 @@ class ServerHandler:
         ui.server_name_var.set("Refreshing...")
         ui.player_count_var.set("...")
         ui.map_name_var.set("...")
+        ui.set_gamestate("")
         ui.ip_label_var.set("...")
         ui.ping_var.set("...")
         ui.game_type_var.set("...")
