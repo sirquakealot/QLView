@@ -36,6 +36,6 @@ pyinstaller --noconsole --icon="quake3.ico" --onedir --add-data="quake3.ico;." -
 `config.ini` (server, interval, layout, scheme …) and `favorites.json` (favorites 1–7) are created automatically; change them via the in-app "Options" (tabs General & Appearance). Default server `108.61.179.235:27962`, interval 10 s. Map images as `.png`/`.jpg` named after the map (e.g. `cpm22.png`).
 
 ## Preview
-![preview1](https://github.com/sirquakealot/QLView/releases/download/v1.7/preview1.jpg "QLView")
+![preview1](https://github.com/sirquakealot/QLView/releases/download/v1.71/preview1.jpg "QLView")
 
 GL & HF
