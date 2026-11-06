@@ -1,5 +1,5 @@
 ﻿import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import os
 import webbrowser
 from PIL import Image, ImageTk
@@ -39,6 +39,7 @@ class UIManager:
         self.own_steamid_var = tk.StringVar(value=self.app.app_config.get("own_steamid", ""))
         self.own_gametype_var = tk.StringVar(value=self.app.app_config.get("own_gametype", "ca"))
         self.own_rating_var = tk.StringVar(value=self.app.app_config.get("own_rating", "B"))
+        self.ioq3_exe_var = tk.StringVar(value=self.app.app_config.get("ioq3_exe", ""))
         self.show_hotkeys_var = tk.BooleanVar(value=self.app.app_config.get("show_hotkeys", True))
         self.start_minimized_var = tk.BooleanVar(value=self.app.app_config.get("start_minimized", False))
         self.start_with_system_var = tk.BooleanVar(value=self.app.app_config.get("start_with_system", False))
@@ -250,6 +251,10 @@ class UIManager:
         def is_spec(p):
             if p.name in config.BOT_NAMES:
                 return True
+            # ioq3-Server (getstatus) liefern weder Team noch Spectator-Status,
+            # und negative Scores sind dort normal (Selfkills) -> alle aktiv.
+            if getattr(p, "ping", None) is not None:
+                return False
             t = team_of(p)
             if t is not None:
                 return t < 0 or t >= 3
@@ -260,7 +265,7 @@ class UIManager:
         def elo_of(p):
             return self.last_elo_by_name.get(utils.normalize_name(p.name)) or 0
 
-        spectators = sorted([p for p in players if is_spec(p)], key=lambda p: p.duration, reverse=True)
+        spectators = sorted([p for p in players if is_spec(p)], key=lambda p: p.duration or 0, reverse=True)
         # Aktive nach Team (1=rot, 2=blau, dann Rest), innerhalb nach Score.
         playing = sorted(
             [p for p in players if not is_spec(p)],
@@ -357,10 +362,15 @@ class UIManager:
         elo_label = tk.Label(row_frame, text=elo_text, fg=elo_fg, font=("Arial", 10, "bold"), bg=bg_color)
         elo_label.grid(row=0, column=5, sticky="e", padx=2)
 
-        # --- Zeit-Spalte ---
+        # --- Zeit-Spalte (A2S) bzw. Ping (ioq3 kennt keine Spielzeit) ---
         row_frame.grid_columnconfigure(7, minsize=60)
         tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=6, sticky="ns", padx=5)
-        time_label = tk.Label(row_frame, text=utils.format_seconds(player.duration), fg="gray", font=("Arial", 10), bg=bg_color)
+        if player.duration is None:
+            ping = getattr(player, "ping", 0)
+            time_text = "bot" if ping == 0 else "{}ms".format(ping)   # Bots haben bei ioq3 Ping 0
+        else:
+            time_text = utils.format_seconds(player.duration)
+        time_label = tk.Label(row_frame, text=time_text, fg="gray", font=("Arial", 10), bg=bg_color)
         time_label.grid(row=0, column=7, padx=2)
 
         tk.Frame(parent, height=1, bg="black").pack(fill="x", padx=5, pady=2)
@@ -532,10 +542,21 @@ class UIManager:
         text_widget.configure(state="disabled")
         return text_widget
 
+    def _find_mapshot(self, filename):
+        """Sucht ein Mapbild zuerst im Mapshots-Ordner neben der exe bzw. im
+        Startordner (eigene Bilder), dann in den mitgelieferten Mapshots.
+        PyInstaller 6 legt die mitgelieferten nach _internal (= sys._MEIPASS)."""
+        for folder in dict.fromkeys([os.path.abspath(config.MAPSHOTS_DIR),
+                                     utils.resource_path(config.MAPSHOTS_DIR)]):
+            path = os.path.join(folder, filename)
+            if os.path.exists(path):
+                return path
+        return None
+
     def load_placeholder_image(self):
         try:
-            default_path = os.path.join(config.MAPSHOTS_DIR, "default.jpg")
-            if os.path.exists(default_path):
+            default_path = self._find_mapshot("default.jpg")
+            if default_path:
                 with Image.open(default_path) as img:
                     img_resized = img.resize((256, 192), Image.Resampling.LANCZOS)
                     self.q3_logo_placeholder_photo = ImageTk.PhotoImage(img_resized)
@@ -553,8 +574,8 @@ class UIManager:
         if not hasattr(self, 'preview_label'): return
         sanitized_map_name = utils.sanitize_filename(mapname_param)
         for ext in ["png", "jpg", "jpeg"]:
-            path_to_check = os.path.join(config.MAPSHOTS_DIR, f"{sanitized_map_name}.{ext}")
-            if os.path.exists(path_to_check):
+            path_to_check = self._find_mapshot(f"{sanitized_map_name}.{ext}")
+            if path_to_check:
                 try:
                     with Image.open(path_to_check) as img:
                         img_resized = img.resize((256, 192), Image.Resampling.LANCZOS)
@@ -656,6 +677,16 @@ class UIManager:
         original_ip = self.ip_label_var.get()
         self.ip_label_var.set("Copied!"); self.root.after(1000, lambda: self.ip_label_var.set(original_ip))
     
+    def ask_ioq3_exe(self, parent=None):
+        """Dateiauswahl fuer die ioq3-Spiel-.exe. Gibt den Pfad oder '' zurueck."""
+        current = self.ioq3_exe_var.get().strip()
+        return filedialog.askopenfilename(
+            parent=parent or self.root,
+            title="Select the game executable (ioq3 / OpenArena based)",
+            initialdir=os.path.dirname(current) if current else None,
+            filetypes=[("Programs", "*.exe"), ("All files", "*.*")],
+        )
+
     def open_options_window(self):
         if self.options_window and self.options_window.winfo_exists():
             self.options_window.lift(); return
@@ -668,7 +699,7 @@ class UIManager:
         original_scheme_name = self.app.app_config.get("color_scheme", "Dark1")
         saved_flag = {"done": False}
         
-        options_width, options_height = 500, 630
+        options_width, options_height = 500, 680
         self.root.update_idletasks()
         main_x, main_y = self.root.winfo_x(), self.root.winfo_y()
         main_width, main_height = self.root.winfo_width(), self.root.winfo_height()
@@ -710,6 +741,7 @@ class UIManager:
                 self.app.app_config["own_steamid"] = self.own_steamid_var.get().strip()
                 self.app.app_config["own_gametype"] = self.own_gametype_var.get()
                 self.app.app_config["own_rating"] = self.own_rating_var.get()
+                self.app.app_config["ioq3_exe"] = self.ioq3_exe_var.get().strip()
 
                 utils.save_app_config(self.app)
                 utils.save_favorites(self.app.favorites)
@@ -767,6 +799,16 @@ class UIManager:
         app_frame = tk.LabelFrame(general_tab, text="Application Settings", padx=10, pady=10); app_frame.pack(fill="x", pady=5)
         tk.Checkbutton(app_frame, text="Start minimized to tray", variable=self.start_minimized_var).pack(anchor="w")
         tk.Checkbutton(app_frame, text="Start with system", variable=self.start_with_system_var).pack(anchor="w")
+        # ioq3-Spiele (OpenArena, OpenVampArena, ...) laufen nicht ueber Steam:
+        # Connect startet diese .exe mit '+connect ip:port'.
+        tk.Label(app_frame, text="ioq3 game executable (Connect for non-Steam servers)").pack(anchor="w", pady=(5, 0))
+        exe_row = tk.Frame(app_frame); exe_row.pack(fill="x")
+        tk.Entry(exe_row, textvariable=self.ioq3_exe_var).pack(side="left", fill="x", expand=True)
+        def browse_exe():
+            path = self.ask_ioq3_exe(parent=self.options_window)
+            if path:
+                self.ioq3_exe_var.set(path)
+        tk.Button(exe_row, text="...", width=3, command=browse_exe).pack(side="left", padx=(5, 0))
 
         # --- TAB 2: Appearance ---
         appearance_tab = tk.Frame(notebook, padx=10, pady=10); notebook.add(appearance_tab, text="Appearance")

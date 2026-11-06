@@ -1,21 +1,6 @@
 # QLView – Quake Server Viewer
 
-A Python desktop app to monitor a Quake Live server. Shows live server info, the current map and player list, and connects with one click.
-
-## Features
-- Server name, map and player count (also in window title & tray tooltip)
-- Live ping via Quake `getchallenge` (close to real in-game ping)
-- Map thumbnail from `Mapshots/`, placeholder if none found
-- Player list: active players (by team red/blue, then score) and spectators/bots (by time), each with score, ELO and connect time
-- ELO and team from qlstats (B-rating for CA), colored by strength; red/blue team square
-- Match score red : blue in the header (hidden in FFA)
-- Click a name → Steam profile
-- Quake color codes (`^0`–`^9`)
-- "Connect" via `steam://connect/`, also from the tray
-- 7 favorites with optional hotkeys (favorite 1 = main server)
-- 28 color schemes with live preview
-- Switchable layout: player list on the right or below
-- Minimizes to system tray (Show/Hide, Refresh, Connect, Exit)
+A Python desktop app to monitor a Quake Live server (added quake3 now). Shows live server info, the current map and player list, and connects with one click.
 
 ## Structure
 `main.py` (entry point, window + tray) · `ui.py` (`UIManager`) · `server.py` (`ServerHandler`, A2S + ping) · `utils.py` (config/favorites/autostart) · `config.py` (constants, color schemes)

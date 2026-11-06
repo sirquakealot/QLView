@@ -6,8 +6,83 @@ import threading
 import json
 import urllib.request
 import urllib.parse
+import re
 import config
 import utils
+
+OOB = b'\xff\xff\xff\xff'
+
+# g_gametype -> Name. 0-7 sind ioq3/baseq3 (+ Team Arena), 8+ kommen aus
+# OpenArena (und damit auch aus OA-basierten Spielen wie OpenVampArena).
+Q3_GAMETYPES = {
+    0: "FFA", 1: "Tournament", 2: "Single Player", 3: "Team DM", 4: "CTF",
+    5: "One Flag CTF", 6: "Overload", 7: "Harvester", 8: "Elimination",
+    9: "CTF Elimination", 10: "Last Man Standing", 11: "Double Domination",
+    12: "Domination", 13: "Possession",
+}
+
+# Spielerzeile in der statusResponse: '<score> <ping> "<name>"'. Manche Mods
+# haengen weitere Zahlen vor den Namen -> beliebig viele Zahlen erlauben.
+_Q3_PLAYER_RE = re.compile(r'^\s*((?:-?\d+\s+)+)"(.*)"\s*$')
+
+
+class Q3Player:
+    """Spieler aus einer ioq3-statusResponse. Gleiche Attribute wie die
+    a2s-Player (name, score, duration), damit die UI beide gleich behandelt.
+    ioq3 liefert keine Verbindungsdauer (duration=None), dafuer den Ping."""
+    __slots__ = ("name", "score", "ping", "duration")
+
+    def __init__(self, name, score, ping):
+        self.name = name
+        self.score = score
+        self.ping = ping
+        self.duration = None
+
+
+def query_q3_status(address, timeout=3.0):
+    """Fragt einen ioq3-Server per 'getstatus' ab (klassisches Q3-Protokoll).
+    Gibt (serverinfo_dict, [Q3Player, ...]) zurueck. Wirft socket.timeout /
+    OSError bei keiner Antwort, ValueError bei unerwarteter Antwort."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(address)
+        sock.send(OOB + b'getstatus')
+        data = sock.recv(65535)
+    finally:
+        sock.close()
+
+    prefix = OOB + b'statusResponse'
+    if not data.startswith(prefix):
+        raise ValueError("No statusResponse")
+    # Q3 hat kein festes Encoding; latin-1 bildet jedes Byte verlustfrei ab.
+    lines = data[len(prefix):].decode("latin-1").split("\n")
+    lines = [l for l in lines if l.strip()]
+    if not lines:
+        raise ValueError("Empty statusResponse")
+
+    parts = lines[0].split("\\")
+    if parts and parts[0] == "":
+        parts = parts[1:]
+    info = {parts[i]: parts[i + 1] for i in range(0, len(parts) - 1, 2)}
+
+    players = []
+    for line in lines[1:]:
+        m = _Q3_PLAYER_RE.match(line)
+        if not m:
+            continue
+        nums = [int(x) for x in m.group(1).split()]
+        score = nums[0]
+        ping = nums[1] if len(nums) > 1 else 0
+        players.append(Q3Player(m.group(2), score, ping))
+    return info, players
+
+
+def _to_int(value, default=0):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 class ServerHandler:
@@ -15,10 +90,18 @@ class ServerHandler:
         self.app = app
         self.refresh_job = None
         self._current_query = 0  # ignoriert veraltete Antworten
+        # Erkanntes Protokoll je Adresse: "a2s" (Quake Live) oder "q3" (ioq3).
+        # Wird bei der ersten erfolgreichen Abfrage gesetzt und bei einem
+        # Fehler wieder geloescht, damit danach neu erkannt wird.
+        self._protocol_by_address = {}
 
-    def measure_ping(self, server_address, timeout=1.0, attempts=2):
-        OOB = b'\xff\xff\xff\xff'
-        payload = OOB + b'getchallenge'
+    def get_protocol(self, address):
+        """'a2s', 'q3' oder None (noch nicht erkannt)."""
+        return self._protocol_by_address.get(tuple(address))
+
+    def measure_ping(self, server_address, timeout=1.0, attempts=2, payload=None):
+        # Standard: 'getchallenge' (QL). ioq3-Server bekommen 'getinfo'.
+        payload = payload or (OOB + b'getchallenge')
         best = 999
         sock = None
         try:
@@ -138,12 +221,76 @@ class ServerHandler:
 
     def _query_worker(self, query_id, address):
         """Läuft im Hintergrund-Thread. KEINE Tkinter-Zugriffe hier!"""
-        result = {"ok": False}
         # Eigene ELO unabhaengig vom Server-Ergebnis (zeigt sie auch, wenn der
         # getrackte Server gerade down ist).
         own_elo = self.fetch_own_elo()
+        address = tuple(address)
+        proto = self._protocol_by_address.get(address)
+
+        if proto == "q3":
+            result = self._query_q3(address, own_elo)
+        else:
+            result = self._query_a2s(address, own_elo, timeout=5.0 if proto == "a2s" else 3.0)
+            # Kein A2S und Protokoll noch unbekannt -> vielleicht ein ioq3-Server
+            # (OpenArena, OpenVampArena, ...). Die sprechen nur 'getstatus'.
+            if not result["ok"] and proto is None and not result.get("dns_error"):
+                result = self._query_q3(address, own_elo)
+
+        if result["ok"]:
+            self._protocol_by_address[address] = result["protocol"]
+        else:
+            self._protocol_by_address.pop(address, None)
+
+        # Ergebnis zurück in den Hauptthread geben
+        root = self.app.root
+        if root and root.winfo_exists() and not self.app.shutting_down:
+            root.after(0, lambda: self._apply_result(query_id, result))
+
+    def _query_q3(self, address, own_elo):
+        """Abfrage eines ioq3-Servers ueber das klassische Q3-Protokoll.
+        Laeuft im Worker-Thread -> keine Tk-Zugriffe."""
         try:
-            info = a2s.info(address, timeout=5.0)
+            info, players = query_q3_status(address, timeout=3.0)
+        except (OSError, ValueError):   # Timeout, DNS, Port zu, Muell-Antwort
+            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
+
+        ping_ms = self.measure_ping(address, timeout=1.5, payload=OOB + b'getinfo ping')
+
+        gt_num = _to_int(info.get("g_gametype"), -1)
+        gt_name = Q3_GAMETYPES.get(gt_num, "Gametype {}".format(gt_num) if gt_num >= 0 else "N/A")
+        game_name = info.get("com_gamename") or info.get("gamename") or ""
+        game = "{} ({})".format(gt_name, game_name) if game_name else gt_name
+
+        max_players = _to_int(info.get("sv_maxclients"), 0) - _to_int(info.get("sv_privateClients"), 0)
+
+        # Fuer die Header-Anzeige: bei Tournament (1v1) den Duel-Score zeigen.
+        header_info = {"gt": "duel"} if gt_num == 1 else None
+
+        return {
+            "ok": True,
+            "protocol": "q3",
+            # Q3-Hostnamen enthalten oft Farbcodes -> fuer die Info-Zeile entfernen.
+            "server_name": utils.strip_quake_colors(info.get("sv_hostname") or info.get("hostname") or "") or "N/A",
+            "map_name": info.get("mapname", "N/A"),
+            "max_players": max(max_players, 0),
+            "players": players,
+            "player_count": len(players),
+            "ping_ms": ping_ms,
+            "game": game,
+            "address": address,
+            # qlstats kennt nur Quake-Live-Server -> keine ELO/SteamID/Teams.
+            "elo_by_name": {},
+            "steamid_by_name": {},
+            "team_by_name": {},
+            "elo_info": header_info,
+            "gamestate": "",
+            "own_elo": own_elo,
+        }
+
+    def _query_a2s(self, address, own_elo, timeout=5.0):
+        """Abfrage eines Quake-Live-Servers per A2S (+ qlstats)."""
+        try:
+            info = a2s.info(address, timeout=timeout)
             ping_ms = self.measure_ping(address, timeout=1.5)
             try:
                 players = a2s.players(address, timeout=5.0)
@@ -166,8 +313,9 @@ class ServerHandler:
             except Exception:
                 gamestate = ""
 
-            result = {
+            return {
                 "ok": True,
+                "protocol": "a2s",
                 "server_name": info.server_name,
                 "map_name": info.map_name,
                 "max_players": info.max_players,
@@ -183,15 +331,12 @@ class ServerHandler:
                 "gamestate": gamestate,
                 "own_elo": own_elo,
             }
-        except (socket.timeout, ConnectionRefusedError, socket.gaierror):
-            result = {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
+        except socket.gaierror:
+            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo, "dns_error": True}
+        except (socket.timeout, ConnectionRefusedError):
+            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
         except Exception:
-            result = {"ok": False, "msg": "Error.", "own_elo": own_elo}
-
-        # Ergebnis zurück in den Hauptthread geben
-        root = self.app.root
-        if root and root.winfo_exists() and not self.app.shutting_down:
-            root.after(0, lambda: self._apply_result(query_id, result))
+            return {"ok": False, "msg": "Error.", "own_elo": own_elo}
 
     def _apply_result(self, query_id, result):
         """Läuft im Hauptthread. Hier sind Tkinter-Zugriffe erlaubt."""

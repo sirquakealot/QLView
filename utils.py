@@ -123,6 +123,7 @@ def load_app_config():
         "own_steamid": "",
         "own_gametype": "ca",
         "own_rating": "B",
+        "ioq3_exe": "",
     }
     parser = configparser.ConfigParser(interpolation=None)
     
@@ -140,6 +141,7 @@ def load_app_config():
         app_cfg["own_steamid"] = parser.get("settings", "own_steamid", fallback="")
         app_cfg["own_gametype"] = parser.get("settings", "own_gametype", fallback="ca")
         app_cfg["own_rating"] = parser.get("settings", "own_rating", fallback="B")
+        app_cfg["ioq3_exe"] = parser.get("settings", "ioq3_exe", fallback="")
 
         # LOGIK FÜR DIE PLAYER-LISTE (Konvertierung/Laden)
         new_position = parser.get("settings", "player_list_position", fallback=None)
@@ -268,6 +270,7 @@ def save_app_config(app):
     parser.set("settings", "own_steamid", app.app_config.get("own_steamid", ""))
     parser.set("settings", "own_gametype", app.app_config.get("own_gametype", "ca"))
     parser.set("settings", "own_rating", app.app_config.get("own_rating", "B"))
+    parser.set("settings", "ioq3_exe", app.app_config.get("ioq3_exe", ""))
 
     try:
         with open(config.CONFIG_FILE, "w") as f: 

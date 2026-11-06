@@ -1,6 +1,7 @@
 ﻿import tkinter as tk
 from tkinter import messagebox
 import os
+import subprocess
 import pystray
 from PIL import Image, ImageTk 
 import threading
@@ -165,11 +166,35 @@ class QLViewApp:
              messagebox.showerror("Connection Error", "No server address is set.")
              return
 
+        # ioq3-Server (OpenArena, OpenVampArena, ...) laufen nicht ueber Steam.
+        if self.server_handler.get_protocol(self.SERVER_ADDRESS) == "q3":
+            self.connect_ioq3()
+            return
+
         connect_cmd = config.CONNECT_COMMAND.format(ip=self.SERVER_ADDRESS[0], port=self.SERVER_ADDRESS[1])
         try:
             os.startfile(connect_cmd)
         except Exception as e:
             messagebox.showerror("Connection Error", f"Failed to execute connect command: {e}")
+
+    def connect_ioq3(self):
+        """Startet die ioq3-Spiel-.exe mit '+connect ip:port'. Ist noch keine
+        .exe hinterlegt, wird einmalig danach gefragt und sie gespeichert."""
+        exe = self.app_config.get("ioq3_exe", "").strip()
+        if not exe or not os.path.isfile(exe):
+            exe = self.ui.ask_ioq3_exe()
+            if not exe:
+                return
+            self.app_config["ioq3_exe"] = exe
+            self.ui.ioq3_exe_var.set(exe)
+            utils.save_app_config(self)
+
+        target = "{}:{}".format(self.SERVER_ADDRESS[0], self.SERVER_ADDRESS[1])
+        try:
+            # Arbeitsverzeichnis = Spielordner, damit das Spiel seine Daten findet.
+            subprocess.Popen([exe, "+connect", target], cwd=os.path.dirname(exe) or None)
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to start game: {e}")
 
 # Wenn main.py direkt ausgeführt wird, starte die App
 if __name__ == "__main__":
