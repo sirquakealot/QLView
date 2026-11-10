@@ -1,5 +1,6 @@
 ﻿import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 import os
 import webbrowser
 from PIL import Image, ImageTk
@@ -34,7 +35,28 @@ class UIManager:
         self.last_steamid_by_name = {}
         self.last_team_by_name = {}
         self.last_server_info = {}
-        
+        # False bei ioq3-Servern (OpenVampArena, ...): dort gibt es keine ELO.
+        self.elo_visible = True
+
+        # --- Zustand fuer ein ruhiges Layout (nichts soll springen) ---
+        # True, solange nach einem Serverwechsel auf die Antwort gewartet wird.
+        self._loading = False
+        # Groesste bisher benoetigte Groesse der Info-Seite. Das Fenster waechst
+        # bei Bedarf, schrumpft aber nicht bei jedem Server wieder zusammen.
+        self._info_min_w = 0
+        self._info_min_h = 0
+        # Zuletzt gesetzte Fenstergroesse (nur bei Aenderung neu setzen).
+        self._applied_size = None
+        # Welche Header-Labels (Score, Gamestate) gerade gepackt sind.
+        self._stats_layout = None
+        # Pfad des gerade angezeigten Mapbilds (nicht bei jeder Abfrage neu laden).
+        self._preview_key = None
+        # Wiederverwendete Zeilen der Spielerliste + feste Elemente.
+        self._player_rows = []
+        self._list_static = None
+        self._list_layout = None
+        self._list_message = None
+
         # Einstellungen Variablen
         self.own_steamid_var = tk.StringVar(value=self.app.app_config.get("own_steamid", ""))
         self.own_gametype_var = tk.StringVar(value=self.app.app_config.get("own_gametype", "ca"))
@@ -65,13 +87,32 @@ class UIManager:
         self._create_player_list_frame(self.player_pane)
 
         self.apply_color_scheme(self.app.app_config["color_scheme"])
-        # Initialer Aufruf der Größenanpassung
+
+        # Platzhalterbild sofort setzen: so hat der Kopfbereich von Anfang an
+        # seine endgueltige Groesse und springt nicht, wenn das erste Mapbild kommt.
+        self.set_placeholder_or_clear_preview()
+
+        # Ist der Startserver als ioq3-Server bekannt, die ELO von Anfang an
+        # ausblenden (nicht erst, wenn die erste Antwort da ist).
+        handler = getattr(self.app, "server_handler", None)
+        if handler is not None:
+            self.set_elo_visible(handler.get_protocol(self.app.SERVER_ADDRESS) != "q3")
+
+        # Fenster sofort in der richtigen Groesse zeigen.
+        self.auto_adjust_window_geometry()
         self.root.after(100, self.auto_adjust_window_geometry)
 
     def _arrange_panes(self):
         for col in range(3): self.main_container.grid_columnconfigure(col, weight=0, minsize=0)
         for row in range(3): self.main_container.grid_rowconfigure(row, weight=0, minsize=0)
-        
+
+        # Neues Layout -> gemerkte Mindestgroesse verwerfen und neu berechnen.
+        self._info_min_w = 0
+        self._info_min_h = 0
+        self._applied_size = None
+        if hasattr(self, "info_frame"):
+            self._unfreeze_info_rows()
+
         self.info_pane.grid_forget()
         self.separator.grid_forget()
         self.player_pane.grid_forget()
@@ -82,8 +123,10 @@ class UIManager:
             self.main_container.grid_columnconfigure(0, weight=1) 
             self.main_container.grid_rowconfigure(2, weight=1) 
 
-            self.info_pane.grid(row=0, column=0, sticky="new")
-            
+            # nsew: die Info-Seite fuellt ihre (feste) Hoehe, die Buttons sitzen
+            # an deren Unterkante -> sie bleiben beim Serverwechsel stehen.
+            self.info_pane.grid(row=0, column=0, sticky="nsew")
+
             self.separator.config(orient='horizontal')
             self.separator.grid(row=1, column=0, sticky="ew", pady=5, padx=0)
             
@@ -101,7 +144,9 @@ class UIManager:
             
             # Sie könnten hier eine weitere Option für "left" hinzufügen, wenn gewünscht.
             
-            self.info_pane.grid(row=0, column=info_pane_col, sticky="new")
+            # nsew + Buttons an der Unterkante (siehe _create_new_button_bar):
+            # die Buttons behalten ihren Platz, egal wie hoch die Infos sind.
+            self.info_pane.grid(row=0, column=info_pane_col, sticky="nsew", pady=(0, 10))
             self.separator.grid(row=0, column=1, sticky="ns", padx=5)
             self.player_pane.grid(row=0, column=player_pane_col, sticky="nsew")
 
@@ -143,27 +188,115 @@ class UIManager:
         self._score_text = ""
         self._gamestate_text = ""
 
-        self.toggle_hotkeys() 
+        # Feste Mindestbreite fuer die Spalten links/rechts vom Bild: Platz fuer
+        # einen normalen Spielstand bzw. "Warmup". Ohne das aendert sich die
+        # Breite der ganzen Info-Seite (und damit des Fensters), sobald Score
+        # oder Gamestate erscheinen, verschwinden oder eine Stelle mehr haben.
+        side_min = max(
+            tkfont.Font(root=self.root, font=("Arial", 12, "bold")).measure("00 : 00"),
+            tkfont.Font(root=self.root, font=("Arial", 11, "bold")).measure("Warmup"),
+        ) + 12
+        self.header_frame.grid_columnconfigure(0, minsize=side_min)
+        self.header_frame.grid_columnconfigure(2, minsize=side_min)
+
+        self.toggle_hotkeys()
 
     def _create_info_frame(self, parent):
         self.info_outer_frame = tk.Frame(parent)
         self.info_outer_frame.pack(fill="x", padx=0, pady=(20,10))
         info_frame = tk.Frame(self.info_outer_frame)
         info_frame.pack(anchor="w")
-        
+        self.info_frame = info_frame
+        self._elo_row_index = None
+
         info_labels_config = [("Server:", self.server_name_var), ("IP:", self.ip_label_var), ("Ping:", self.ping_var), ("Map:", self.map_name_var), ("Players:", self.player_count_var), ("Gamemode:", self.game_type_var), ("ELO:", self.elo_info_var)]
         for i, (text, var) in enumerate(info_labels_config):
-            tk.Label(info_frame, text=text, font=("Arial", 10, "bold")).grid(row=i, column=0, sticky="e", padx=(0,5), pady=0)
+            # Oben ausgerichtet (ne/nw): die erste Textzeile steht immer an
+            # derselben Stelle, egal ob der Wert ein- oder zweizeilig ist.
+            tk.Label(info_frame, text=text, font=("Arial", 10, "bold")).grid(row=i, column=0, sticky="ne", padx=(0,5), pady=0)
             lbl = tk.Label(info_frame, textvariable=var, font=("Arial", 10), wraplength=250, justify=tk.LEFT)
-            lbl.grid(row=i, column=1, sticky="w", pady=0)
+            lbl.grid(row=i, column=1, sticky="nw", pady=0)
             if text == "IP:":
                 lbl.config(cursor="hand2"); lbl.bind("<Button-1>", self._copy_ip)
             if text == "Ping:":
                 self.ping_label = lbl
+            if text == "ELO:":
+                self.elo_row_widgets = info_frame.grid_slaves(row=i)
+                self._elo_row_index = i
+        self._info_row_count = len(info_labels_config)
+
+    def _freeze_info_rows(self):
+        """Haelt die Zeilen der Server-Infos auf ihrer aktuellen Hoehe fest:
+        Zeilen koennen wachsen, schrumpfen aber nicht wieder. Sonst wuerde
+        z.B. ein zweizeiliger Servername beim Wechsel auf einen Server mit
+        kurzem Namen (oder auf den Lade-Platzhalter) auf eine Zeile schrumpfen
+        und alles darunter nach oben rutschen - und beim Zurueckwechseln
+        wieder nach unten."""
+        for i in range(self._info_row_count):
+            if i == self._elo_row_index:
+                continue   # wird ueber set_elo_visible ein-/ausgeblendet
+            try:
+                height = self.info_frame.grid_bbox(0, i)[3]
+            except (tk.TclError, TypeError, IndexError):
+                continue
+            if height > 1:
+                self.info_frame.grid_rowconfigure(i, minsize=height)
+
+    def _unfreeze_info_rows(self):
+        for i in range(self._info_row_count):
+            self.info_frame.grid_rowconfigure(i, minsize=0)
+
+    def begin_loading(self, address, switched, elo_visible=True):
+        """Sofortige Rueckmeldung auf einen Klick, ohne dass sich das Layout
+        bewegt. switched=False: gleicher Server, die Daten bleiben stehen und
+        nur der Ping zeigt '...'. switched=True: anderer Server -> Platzhalter,
+        die exakt den Platz der bisherigen Werte einnehmen."""
+        self.refresh_hotkey_buttons()   # geklickten Favoriten sofort markieren
+        self.ping_var.set("...")
+        if not switched:
+            return
+
+        self._loading = True
+        self._freeze_info_rows()
+        # ELO passend zum Zielserver: bei bekannten ioq3-Servern direkt weg.
+        self.set_elo_visible(elo_visible)
+
+        self.error_message_var.set("")
+        self.server_name_var.set("Loading...")
+        self.ip_label_var.set("{}:{}".format(address[0], address[1]) if address and address[0] else "N/A")
+        self.map_name_var.set("...")
+        self.player_count_var.set("...")
+        self.game_type_var.set("...")
+
+        # Spielstand/Gamestate leeren (ihr Platz bleibt reserviert).
+        self._score_text = ""
+        self._gamestate_text = ""
+        self._render_header_stats()
+
+        # Server-Durchschnitt weg, die eigene ELO bleibt stehen.
+        self.last_server_info = {}
+        self._server_elo_summary = None
+        self._render_elo_line()
+
+        # Die Spieler des alten Servers nicht weiter anzeigen.
+        self.last_players = []
+        self.last_elo_by_name = {}
+        self.last_steamid_by_name = {}
+        self.last_team_by_name = {}
+        self.show_player_list_message("Loading...")
+
+        self.root.title(config.APP_NAME)
+
+    def end_loading(self):
+        """Ladezustand beenden (Antwort ist da)."""
+        self._loading = False
 
     def _create_new_button_bar(self, parent):
         bar = tk.Frame(parent, height=45)
-        bar.pack(side="top", fill="x", pady=(5, 10))
+        # Unten in der Info-Seite verankert: so bleiben die Buttons an ihrem
+        # Platz, auch wenn die Infos darueber mal eine Zeile mehr oder weniger
+        # haben (zweizeiliger Servername, ELO-Zeile bei ioq3 ausgeblendet).
+        bar.pack(side="bottom", fill="x", pady=(5, 10))
         bar.pack_propagate(False)
         bar.grid_columnconfigure((0, 1), weight=1)
         self._create_standard_button(bar, "OPTIONS", self.open_options_window).grid(row=0, column=0, sticky="nsew", padx=(0,5))
@@ -205,7 +338,7 @@ class UIManager:
         self._bind_mouse_wheel_recursive(self.player_canvas)
 
 
-    def update_player_list(self, players, elo_by_name=None, steamid_by_name=None, team_by_name=None):
+    def update_player_list(self, players, elo_by_name=None, steamid_by_name=None, team_by_name=None, rebuild=False):
         # Zuletzt empfangene Spielerliste merken, damit ein Schema-Wechsel
         # die Liste in den neuen Farben neu zeichnen kann.
         self.last_players = players
@@ -218,17 +351,8 @@ class UIManager:
         if team_by_name is not None:
             self.last_team_by_name = team_by_name
 
-        # Scrollposition merken, damit die Liste bei jeder Aktualisierung nicht
-        # nach oben springt.
-        try:
-            prev_top = self.player_canvas.yview()[0]
-        except Exception:
-            prev_top = 0.0
-
-        for widget in self.scrollable_frame.winfo_children(): widget.destroy()
         if not self.current_color_scheme: return
-        bg_color = self.current_color_scheme["bg"]; fg_color = self.current_color_scheme["fg"]
-        self.scrollable_frame.configure(bg=bg_color)
+        self._list_message = None
 
         # Ghost-Player rausfiltern: QL haelt manchmal Karteileichen in der
         # Liste (Score 0, seit >1h "verbunden"), die nicht wirklich drauf sind.
@@ -292,88 +416,185 @@ class UIManager:
                 self._set_match_score(None)
         else:
             self._set_match_score(None)        
-        tk.Label(self.scrollable_frame, text="Players", font=("Arial", 11, "bold"), bg=bg_color, fg=fg_color).pack(pady=(0,5))
-        tk.Frame(self.scrollable_frame, height=1, bg="black").pack(fill="x", padx=5, pady=(0, 5))
+        self._render_player_list(playing, spectators, rebuild=rebuild)
 
-        if not playing and not spectators:
-            tk.Label(self.scrollable_frame, text="-- No Players --", font=("Arial", 10, "italic"), bg=bg_color, fg=fg_color).pack(pady=5)
-        else:
-            for player in playing: 
-                self._create_player_list_row(self.scrollable_frame, player, is_spectator=False)
-            
-            if spectators:
-                tk.Frame(self.scrollable_frame, height=3, bg="gray").pack(fill="x", padx=5, pady=(5, 5)) 
-                for player in spectators: 
-                    self._create_player_list_row(self.scrollable_frame, player, is_spectator=True)
-        
-        self.root.update_idletasks() 
-        self._bind_mouse_wheel_recursive(self.scrollable_frame) 
-        self.player_canvas.configure(scrollregion=self.player_canvas.bbox("all"))
-        self.player_canvas.yview_moveto(prev_top)
+    def show_player_list_message(self, text):
+        """Zeigt statt der Spieler nur einen Hinweis (z.B. 'Loading...')."""
+        self._list_message = text
+        if self.current_color_scheme:
+            self._render_player_list([], [], message=text)
 
-    def _create_player_list_row(self, parent, player, is_spectator):
+    def _render_player_list(self, playing, spectators, message=None, rebuild=False):
+        """Zeichnet die Spielerliste. Die Zeilen werden wiederverwendet und nur
+        ihre Texte geaendert - frueher wurde bei jeder Aktualisierung alles
+        zerstoert und neu gebaut, was sichtbar geflackert hat. rebuild=True
+        baut alles neu auf (noetig nach einem Farbschema-Wechsel)."""
+        scheme = self.current_color_scheme
+        bg_color = scheme["bg"]; fg_color = scheme["fg"]
+        frame = self.scrollable_frame
+
+        if rebuild or self._list_static is None:
+            for widget in frame.winfo_children(): widget.destroy()
+            self._player_rows = []
+            self._list_layout = None
+            frame.configure(bg=bg_color)
+            self._list_static = {
+                "title": tk.Label(frame, text="Players", font=("Arial", 11, "bold"), bg=bg_color, fg=fg_color),
+                "title_line": tk.Frame(frame, height=1, bg="black"),
+                "message": tk.Label(frame, font=("Arial", 10, "italic"), bg=bg_color, fg=fg_color),
+                "divider": tk.Frame(frame, height=3, bg="gray"),
+            }
+            for widget in self._list_static.values():
+                self._bind_mouse_wheel_recursive(widget)
+        static = self._list_static
+
+        entries = [(p, False) for p in playing] + [(p, True) for p in spectators]
+        while len(self._player_rows) < len(entries):
+            self._player_rows.append(self._create_player_row(frame))
+        for row, (player, is_spectator) in zip(self._player_rows, entries):
+            self._fill_player_row(row, player, is_spectator)
+
+        if message is None and not entries:
+            message = "-- No Players --"
+        if message:
+            static["message"].configure(text=message)
+
+        # Nur neu anordnen, wenn sich der Aufbau geaendert hat (Spieler
+        # gekommen/gegangen). Sonst bleiben alle Widgets, wo sie sind.
+        layout = (len(playing), len(spectators), bool(message))
+        if layout != self._list_layout:
+            self._list_layout = layout
+            for widget in frame.winfo_children(): widget.pack_forget()
+            static["title"].pack(pady=(0, 5))
+            static["title_line"].pack(fill="x", padx=5, pady=(0, 5))
+            if message:
+                static["message"].pack(pady=5)
+            else:
+                for index, row in enumerate(self._player_rows[:len(entries)]):
+                    if spectators and index == len(playing):
+                        static["divider"].pack(fill="x", padx=5, pady=(5, 5))
+                    row["frame"].pack(fill="x")
+
+    def _create_player_row(self, parent):
+        """Legt eine leere Zeile der Spielerliste an (wird wiederverwendet)."""
         bg_color = self.current_color_scheme["bg"]
-        row_frame = tk.Frame(parent, bg=bg_color); row_frame.pack(fill="x", expand=True)
+        outer = tk.Frame(parent, bg=bg_color)
+        row_frame = tk.Frame(outer, bg=bg_color); row_frame.pack(fill="x", expand=True)
         row_frame.grid_columnconfigure(0, weight=1)
-        name_key = utils.normalize_name(player.name)
-        name_widget = self.render_colored_name(row_frame, utils.truncate_text(player.name or "(anon)", config.MAX_PLAYER_NAME_CHARS))
+        name_widget = self._create_name_widget(row_frame)
         name_widget.grid(row=0, column=0, sticky="w", padx=2)
 
-        # Klick auf den Namen -> Steam-Profil. Nur mit echter SteamID (qlstats).
-        # Ohne SteamID und bei Bots kein Link.
-        if player.name not in config.BOT_NAMES:
-            steamid = self.last_steamid_by_name.get(name_key)
-            if steamid:
-                name_widget.configure(cursor="hand2")
-                name_widget.bind(
-                    "<Button-1>",
-                    lambda e, sid=steamid: webbrowser.open("https://steamcommunity.com/profiles/{}".format(sid)),
-                )
-
         # --- Team-Farbe (qlstats): Quadrat links neben der ELO ---
-        # team 1 = rot, 2 = blau; frei/Spectator -> kein Quadrat.
-        team = self.last_team_by_name.get(name_key)
-        team_color = {1: "#e03030", 2: "#3565e0"}.get(team)
-
-        # --- ELO-Spalte (qlstats) ---
-        # Abgleich ueber den normalisierten Namen. Bots und Spieler mit < 5
-        # gewerteten Spielen liefern kein Rating -> "-".
-        elo = self.last_elo_by_name.get(name_key)
-        if elo is not None:
-            elo_text = str(elo)
-            elo_fg = utils.get_elo_color(elo, self.current_color_scheme["fg"])
-        else:
-            elo_text = "-"
-            elo_fg = "gray"
-
         row_frame.grid_columnconfigure(1, minsize=14)
-        team_label = tk.Label(row_frame, text=("\u25a0" if team_color else ""),
-                              fg=(team_color or bg_color), bg=bg_color, font=("Arial", 9))
+        team_label = tk.Label(row_frame, text="", fg=bg_color, bg=bg_color, font=("Arial", 9))
         team_label.grid(row=0, column=1, padx=(0, 2))
         tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=2, sticky="ns", padx=5)
 
-        # --- Score (A2S). Spectators haben keinen sinnvollen Score. ---
+        # --- Score (A2S) ---
         row_frame.grid_columnconfigure(3, minsize=34)
-        score_text = str(player.score) if not is_spectator else ""
-        score_label = tk.Label(row_frame, text=score_text, fg="gray", font=("Arial", 10), bg=bg_color)
+        score_label = tk.Label(row_frame, text="", fg="gray", font=("Arial", 10), bg=bg_color)
         score_label.grid(row=0, column=3, sticky="e", padx=2)
-        tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=4, sticky="ns", padx=5)
+
+        # --- ELO-Spalte (qlstats), bei ioq3-Servern ausgeblendet ---
+        elo_sep = tk.Frame(row_frame, width=1, bg="black")
+        elo_sep.grid(row=0, column=4, sticky="ns", padx=5)
         row_frame.grid_columnconfigure(5, minsize=46)
-        elo_label = tk.Label(row_frame, text=elo_text, fg=elo_fg, font=("Arial", 10, "bold"), bg=bg_color)
+        elo_label = tk.Label(row_frame, text="", font=("Arial", 10, "bold"), bg=bg_color)
         elo_label.grid(row=0, column=5, sticky="e", padx=2)
 
         # --- Zeit-Spalte (A2S) bzw. Ping (ioq3 kennt keine Spielzeit) ---
         row_frame.grid_columnconfigure(7, minsize=60)
         tk.Frame(row_frame, width=1, bg="black").grid(row=0, column=6, sticky="ns", padx=5)
-        if player.duration is None:
-            ping = getattr(player, "ping", 0)
-            time_text = "bot" if ping == 0 else "{}ms".format(ping)   # Bots haben bei ioq3 Ping 0
-        else:
-            time_text = utils.format_seconds(player.duration)
-        time_label = tk.Label(row_frame, text=time_text, fg="gray", font=("Arial", 10), bg=bg_color)
+        time_label = tk.Label(row_frame, text="", fg="gray", font=("Arial", 10), bg=bg_color)
         time_label.grid(row=0, column=7, padx=2)
 
-        tk.Frame(parent, height=1, bg="black").pack(fill="x", padx=5, pady=2)
+        tk.Frame(outer, height=1, bg="black").pack(fill="x", padx=5, pady=2)
+
+        row = {
+            "frame": outer, "row_frame": row_frame, "name": name_widget,
+            "team": team_label, "score": score_label, "elo_sep": elo_sep,
+            "elo": elo_label, "time": time_label,
+            "name_str": None, "steamid": None, "elo_shown": True,
+        }
+        # Klick auf den Namen -> Steam-Profil (nur wenn eine SteamID bekannt ist).
+        name_widget.bind("<Button-1>", lambda e, r=row: self._open_player_profile(r))
+        self._bind_mouse_wheel_recursive(outer)
+        return row
+
+    def _open_player_profile(self, row):
+        steamid = row.get("steamid")
+        if steamid:
+            webbrowser.open("https://steamcommunity.com/profiles/{}".format(steamid))
+
+    def _fill_player_row(self, row, player, is_spectator):
+        """Schreibt die Daten eines Spielers in eine vorhandene Zeile."""
+        bg_color = self.current_color_scheme["bg"]
+        name_key = utils.normalize_name(player.name)
+
+        display_name = utils.truncate_text(player.name or "(anon)", config.MAX_PLAYER_NAME_CHARS)
+        if display_name != row["name_str"]:
+            row["name_str"] = display_name
+            self._set_colored_name(row["name"], display_name)
+
+        # Steam-Profil-Link nur mit echter SteamID (qlstats), nicht bei Bots.
+        steamid = None
+        if player.name not in config.BOT_NAMES:
+            steamid = self.last_steamid_by_name.get(name_key) or None
+        if steamid != row["steamid"]:
+            row["steamid"] = steamid
+            row["name"].configure(cursor="hand2" if steamid else "xterm")
+
+        # team 1 = rot, 2 = blau; frei/Spectator -> kein Quadrat.
+        team = self.last_team_by_name.get(name_key)
+        team_color = {1: "#e03030", 2: "#3565e0"}.get(team)
+        row["team"].configure(text=("■" if team_color else ""), fg=(team_color or bg_color))
+
+        # Spectators haben keinen sinnvollen Score.
+        row["score"].configure(text=(str(player.score) if not is_spectator else ""))
+
+        # ELO: Abgleich ueber den normalisierten Namen. Bots und Spieler mit
+        # < 5 gewerteten Spielen liefern kein Rating -> "-". Bei ioq3-Servern
+        # verschwindet die ganze Spalte samt Trennstrich.
+        if self.elo_visible != row["elo_shown"]:
+            row["elo_shown"] = self.elo_visible
+            if self.elo_visible:
+                row["elo_sep"].grid()
+                row["elo"].grid()
+                row["row_frame"].grid_columnconfigure(5, minsize=46)
+            else:
+                row["elo_sep"].grid_remove()
+                row["elo"].grid_remove()
+                row["row_frame"].grid_columnconfigure(5, minsize=0)
+        if self.elo_visible:
+            elo = self.last_elo_by_name.get(name_key)
+            if elo is not None:
+                row["elo"].configure(text=str(elo), fg=utils.get_elo_color(elo, self.current_color_scheme["fg"]))
+            else:
+                row["elo"].configure(text="-", fg="gray")
+
+        # Zeit (A2S) bzw. Ping (ioq3); Bots haben bei ioq3 Ping 0.
+        if player.duration is None:
+            ping = getattr(player, "ping", 0)
+            time_text = "bot" if ping == 0 else "{}ms".format(ping)
+        else:
+            time_text = utils.format_seconds(player.duration)
+        row["time"].configure(text=time_text)
+
+    def set_elo_visible(self, visible):
+        """Blendet die ELO-Zeile und die ELO-Spalte ein/aus (aus bei ioq3-
+        Servern wie OpenVampArena, die keine ELO haben)."""
+        visible = bool(visible)
+        if visible == self.elo_visible:
+            return
+        self.elo_visible = visible
+        for w in getattr(self, "elo_row_widgets", ()):
+            if visible:
+                w.grid()
+            else:
+                w.grid_remove()
+        # Keine Groessenanpassung noetig: der Platz der ELO-Zeile ist in der
+        # Fensterhoehe immer eingerechnet (siehe auto_adjust_window_geometry),
+        # das Fenster aendert seine Groesse beim Ein-/Ausblenden also nicht.
 
     def set_server_elo_info(self, info):
         """Server-Durchschnitt (Ø/Min/Max) als hinterer Teil der ELO-Zeile.
@@ -407,7 +628,9 @@ class UIManager:
             parts.append(str(self._own_elo_val))
         if self._server_elo_summary:
             parts.append(self._server_elo_summary)
-        self.elo_info_var.set("  \u00b7  ".join(parts) if parts else "N/A")
+        # Solange noch geladen wird, ist "N/A" (noch) nicht richtig -> "...".
+        empty = "..." if self._loading else "N/A"
+        self.elo_info_var.set("  \u00b7  ".join(parts) if parts else empty)
 
     def set_gamestate(self, raw):
         """Setzt den Gamestate-Text unter dem Score (leer -> ausblenden)."""
@@ -422,32 +645,61 @@ class UIManager:
     def _render_header_stats(self):
         """Score oben, Gamestate darunter. Fehlt der Score (z.B. FFA), rutscht
         der Gamestate an dessen Stelle nach oben."""
+        self.score_var.set(self._score_text)
+        self.gamestate_var.set(self._gamestate_text)
+        # Nur umpacken, wenn ein Label dazukommt oder wegfaellt - nicht bei
+        # jeder Aktualisierung (das hat geflackert).
+        layout = (bool(self._score_text), bool(self._gamestate_text))
+        if layout == self._stats_layout:
+            return
+        self._stats_layout = layout
         self.score_label.pack_forget()
         self.gamestate_label.pack_forget()
-        if self._score_text:
-            self.score_var.set(self._score_text)
+        if layout[0]:
             self.score_label.pack(anchor="w")
-        if self._gamestate_text:
-            self.gamestate_var.set(self._gamestate_text)
+        if layout[1]:
             self.gamestate_label.pack(anchor="w")
 
     def auto_adjust_window_geometry(self):
+        """Passt die Fenstergroesse an den Inhalt an - aber ruhig: Die Groesse
+        wird nur gesetzt, wenn sie sich wirklich aendert, das Fenster waechst
+        bei Bedarf und schrumpft nicht wieder, und die ELO-Zeile ist immer
+        eingerechnet. Dadurch bleibt das Fenster beim Wechsel zwischen den
+        Favoriten (auch Quake Live <-> ioq3) gleich gross."""
+        if not self.root.winfo_exists():
+            return
         self.root.update_idletasks()
+        # Erreichte Zeilenhoehen der Server-Infos als Minimum merken.
+        self._freeze_info_rows()
+
+        info_w = self.info_pane.winfo_reqwidth()
+        info_h = self.info_pane.winfo_reqheight()
+        if not self.elo_visible:
+            # Platz der ausgeblendeten ELO-Zeile mitrechnen (bleibt als Luft
+            # ueber den Buttons), damit das Fenster bei ioq3 nicht schrumpft.
+            info_h += max((w.winfo_reqheight() for w in getattr(self, "elo_row_widgets", ())), default=0)
+        info_w = max(info_w, 350, self._info_min_w)
+        info_h = max(info_h, self._info_min_h)
+        self._info_min_w, self._info_min_h = info_w, info_h
 
         if self.player_list_position_var.get() == "bottom":
-            final_width = max(self.info_pane.winfo_reqwidth() + 20, 450)
-            final_height = self.info_pane.winfo_reqheight() + self.separator.winfo_reqheight() + 300
+            self.main_container.grid_rowconfigure(0, minsize=info_h)
+            final_width = max(info_w + 20, 450)
+            final_height = info_h + self.separator.winfo_reqheight() + 300
         else:
             # Breite aus den tatsächlichen Pane-Anforderungen berechnen,
             # statt die (evtl. veraltete) aktuelle Fensterbreite zu recyceln.
             # So stimmt die Geometrie auch direkt nach einem Layout-Wechsel.
-            info_w = max(self.info_pane.winfo_reqwidth(), 350)
+            self.main_container.grid_columnconfigure(0, minsize=info_w)
             sep_w = self.separator.winfo_reqwidth()
             player_w = max(self.player_pane.winfo_reqwidth(), 250)
             final_width = info_w + sep_w + player_w + 30
-            final_height = self.info_pane.winfo_reqheight() + 20
+            final_height = info_h + 20
 
-        self.root.geometry(f"{final_width}x{final_height}")
+        size = (final_width, final_height)
+        if size != self._applied_size:
+            self._applied_size = size
+            self.root.geometry(f"{final_width}x{final_height}")
 
     def apply_color_scheme(self, scheme_name):
         if scheme_name not in config.COLOR_SCHEMES: return
@@ -458,7 +710,10 @@ class UIManager:
         # uebernehmen ihre Hintergrundfarbe beim Erstellen, daher reicht
         # Umkonfigurieren nicht - die Liste muss neu aufgebaut werden.
         if hasattr(self, 'scrollable_frame') and self.scrollable_frame.winfo_exists():
-            self.update_player_list(self.last_players)
+            if self._list_message:
+                self._render_player_list([], [], message=self._list_message, rebuild=True)
+            else:
+                self.update_player_list(self.last_players, rebuild=True)
 
     def _apply_colors_recursive(self, widget, scheme=None):
         active_scheme = scheme if scheme else self.current_color_scheme
@@ -489,6 +744,14 @@ class UIManager:
         for child in widget.winfo_children(): self._apply_colors_recursive(child, scheme=scheme)
 
     def render_colored_name(self, parent, name_str):
+        """Erzeugt ein Textfeld mit dem farbigen Namen (Quake-Farbcodes)."""
+        text_widget = self._create_name_widget(parent)
+        self._set_colored_name(text_widget, name_str)
+        return text_widget
+
+    def _create_name_widget(self, parent):
+        """Leeres Namens-Textfeld samt Farb-Tags. Der Name selbst kommt ueber
+        _set_colored_name und kann spaeter beliebig oft ersetzt werden."""
         default_color = self.current_color_scheme.get("fg", "#ffffff")
         # Quake-Live-Farbpalette ^0 - ^9
         color_map = {
@@ -507,6 +770,13 @@ class UIManager:
                             highlightbackground=parent.cget("bg"), wrap="none", font=("Arial", 10, "bold"), padx=0, pady=0)
         for code, color_name in color_map.items():
             text_widget.tag_configure(f"color_{code}", foreground=color_name)
+        text_widget.configure(state="disabled")
+        return text_widget
+
+    def _set_colored_name(self, text_widget, name_str):
+        """Schreibt einen Namen mit Quake-Farbcodes (^0-^9) in das Textfeld."""
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
 
         clean_name = name_str.replace('\x00', '')
         current_tag = "color_7"
@@ -576,12 +846,16 @@ class UIManager:
         for ext in ["png", "jpg", "jpeg"]:
             path_to_check = self._find_mapshot(f"{sanitized_map_name}.{ext}")
             if path_to_check:
+                # Gleiches Bild wie schon angezeigt -> nichts tun. Frueher wurde
+                # das Bild bei jeder Aktualisierung neu geladen und skaliert.
+                if path_to_check == self._preview_key:
+                    return
                 try:
                     with Image.open(path_to_check) as img:
                         img_resized = img.resize((256, 192), Image.Resampling.LANCZOS)
                         photo_to_display = ImageTk.PhotoImage(img_resized)
                         self.preview_label.config(text="", image=photo_to_display, compound="none"); self.preview_label.image = photo_to_display
-                    if self.root.winfo_exists(): self.root.update_idletasks()
+                    self._preview_key = path_to_check
                     return
                 except Exception as e: print(f"Warning: Local image '{path_to_check}' could not be loaded: {e}")
         
@@ -589,8 +863,9 @@ class UIManager:
     
     def set_placeholder_or_clear_preview(self):
         if not (hasattr(self, 'preview_label') and self.preview_label.winfo_exists()): return
-        
-        fg_color = self.current_color_scheme.get("fg", "#ffffff")
+        self._preview_key = None
+
+        fg_color = (self.current_color_scheme or {}).get("fg", "#ffffff")
         
         if self.q3_logo_placeholder_photo:
             self.preview_label.config(image=self.q3_logo_placeholder_photo); self.preview_label.image = self.q3_logo_placeholder_photo
@@ -606,9 +881,7 @@ class UIManager:
                 )
         else:
             self.preview_label.config(text="Mapshot N/A (Error)", image="", compound="none"); self.preview_label.image = None
-            
-        if self.root.winfo_exists(): self.root.update_idletasks()
-            
+
     def _create_standard_button(self, parent, text, command):
         return tk.Button(parent, text=text, command=command, font=("Arial", 10, "bold"), relief="flat", padx=10, pady=5)
 
@@ -673,9 +946,19 @@ class UIManager:
                 self.hotkeys_button_frame.pack_forget()
 
     def _copy_ip(self, event=None):
-        self.root.clipboard_clear(); self.root.clipboard_append(self.ip_label_var.get())
         original_ip = self.ip_label_var.get()
-        self.ip_label_var.set("Copied!"); self.root.after(1000, lambda: self.ip_label_var.set(original_ip))
+        # Doppelklick: nicht "Copied!" selbst in die Zwischenablage kopieren.
+        if original_ip == "Copied!":
+            return
+        self.root.clipboard_clear(); self.root.clipboard_append(original_ip)
+        self.ip_label_var.set("Copied!")
+
+        def restore():
+            # Nur zuruecksetzen, wenn inzwischen keine neue Adresse gesetzt
+            # wurde (z.B. durch einen Serverwechsel innerhalb der Sekunde).
+            if self.ip_label_var.get() == "Copied!":
+                self.ip_label_var.set(original_ip)
+        self.root.after(1000, restore)
     
     def ask_ioq3_exe(self, parent=None):
         """Dateiauswahl fuer die ioq3-Spiel-.exe. Gibt den Pfad oder '' zurueck."""

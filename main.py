@@ -145,21 +145,28 @@ class QLViewApp:
     # --- AKTIONSMETHODEN ---
 
     def switch_to_favorite(self, fav_num):
-        address_str = self.favorites.get(str(fav_num))
-        if address_str:
-            try:
-                new_address = utils.parse_address(address_str)
-                self.SERVER_ADDRESS = new_address
-                if fav_num == 1:
-                    self.main_server_address_setting = new_address
-                    self.app_config["main_server_address"] = f"{new_address[0]}:{new_address[1]}"
-                    utils.save_app_config(self)
-                
-                self.server_handler.manual_refresh()
-                self.show_window_from_tray()
-                
-            except ValueError as e:
-                messagebox.showerror("Error", f"Invalid address format for Favorite {fav_num}: {e}")
+        address_str = (self.favorites.get(str(fav_num)) or "").strip()
+        if not address_str:
+            return   # leerer Favoriten-Slot
+        try:
+            new_address = utils.parse_address(address_str)
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid address format for Favorite {fav_num}: {e}")
+            return
+
+        self.SERVER_ADDRESS = new_address
+        # Favorit 1 ist der Hauptserver. Nur speichern, wenn sich die Adresse
+        # wirklich geaendert hat - frueher wurde bei JEDEM Klick auf die "1"
+        # die config.ini samt Autostart-Verknuepfung neu geschrieben, was den
+        # Klick spuerbar verzoegert hat.
+        if fav_num == 1 and tuple(new_address) != tuple(self.main_server_address_setting):
+            self.main_server_address_setting = new_address
+            self.app_config["main_server_address"] = f"{new_address[0]}:{new_address[1]}"
+            utils.save_app_config(self, update_autostart=False)
+
+        # Schaltet sofort um (Button markiert, Ladezustand) und fragt neu ab.
+        self.server_handler.manual_refresh()
+        self.show_window_from_tray()
                 
     def connect_to_server(self, icon=None, item=None):
         if not self.SERVER_ADDRESS or self.SERVER_ADDRESS[0] == "":

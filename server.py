@@ -7,10 +7,20 @@ import json
 import urllib.request
 import urllib.parse
 import re
+from concurrent.futures import ThreadPoolExecutor
 import config
 import utils
 
 OOB = b'\xff\xff\xff\xff'
+
+# Eigene ELO aendert sich nur nach einem Match -> nicht bei jeder
+# Aktualisierung neu von qlstats holen.
+OWN_ELO_TTL = 60.0
+
+# So viele fehlgeschlagene Abfragen in Folge braucht es, bis ein Server, der
+# gerade noch Daten geliefert hat, als "Connection failed" angezeigt wird.
+# Ein einzelnes verlorenes UDP-Paket laesst die Anzeige damit nicht flackern.
+FAILS_UNTIL_ERROR = 2
 
 # g_gametype -> Name. 0-7 sind ioq3/baseq3 (+ Team Arena), 8+ kommen aus
 # OpenArena (und damit auch aus OA-basierten Spielen wie OpenVampArena).
@@ -91,13 +101,45 @@ class ServerHandler:
         self.refresh_job = None
         self._current_query = 0  # ignoriert veraltete Antworten
         # Erkanntes Protokoll je Adresse: "a2s" (Quake Live) oder "q3" (ioq3).
-        # Wird bei der ersten erfolgreichen Abfrage gesetzt und bei einem
-        # Fehler wieder geloescht, damit danach neu erkannt wird.
+        # Wird bei jeder erfolgreichen Abfrage gesetzt. ioq3-Server werden
+        # zusaetzlich in der config.ini gemerkt, damit die ELO dort schon beim
+        # Programmstart und sofort beim Umschalten ausgeblendet ist.
         self._protocol_by_address = {}
+        for entry in str(app.app_config.get("q3_servers", "")).split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                self._protocol_by_address[tuple(utils.parse_address(entry))] = "q3"
+            except ValueError:
+                pass
+
+        # Adresse, deren Daten (oder Ladezustand) gerade im Fenster stehen.
+        self._shown_address = None
+        # True, sobald fuer _shown_address echte Serverdaten angezeigt werden.
+        self._has_data = False
+        self._fail_count = 0
+        # (Schluessel, Zeitpunkt, Wert) der zuletzt geholten eigenen ELO.
+        self._own_elo_cache = None
 
     def get_protocol(self, address):
         """'a2s', 'q3' oder None (noch nicht erkannt)."""
         return self._protocol_by_address.get(tuple(address))
+
+    def _remember_protocol(self, address, protocol):
+        """Merkt sich das erkannte Protokoll (nur im Hauptthread aufrufen) und
+        speichert die Liste der ioq3-Server, wenn sie sich geaendert hat."""
+        address = tuple(address)
+        if self._protocol_by_address.get(address) == protocol:
+            return
+        self._protocol_by_address[address] = protocol
+        q3_servers = ",".join(sorted(
+            "{}:{}".format(a[0], a[1])
+            for a, p in self._protocol_by_address.items() if p == "q3"
+        ))
+        if q3_servers != self.app.app_config.get("q3_servers", ""):
+            self.app.app_config["q3_servers"] = q3_servers
+            utils.save_app_config(self.app, update_autostart=False)
 
     def measure_ping(self, server_address, timeout=1.0, attempts=2, payload=None):
         # Standard: 'getchallenge' (QL). ioq3-Server bekommen 'getinfo'.
@@ -151,7 +193,7 @@ class ServerHandler:
         except Exception:
             return {}, {}, {}, None
 
-        if not data or not data.get("ok"):
+        if not isinstance(data, dict) or not data.get("ok"):
             return {}, {}, {}, None
 
         elo_by_name = {}
@@ -173,17 +215,37 @@ class ServerHandler:
             # Rating gibt es nur ab 5 gewerteten Spielen.
             rating = p.get("rating")
             if rating is not None:
-                elo_by_name[key] = int(rating)
+                try:
+                    elo_by_name[key] = int(rating)
+                except (TypeError, ValueError):
+                    pass
 
         info = data.get("serverinfo") or None
         return elo_by_name, steamid_by_name, team_by_name, info
 
     # --- Öffentlicher Einstiegspunkt: plant eine Abfrage ---
-    def fetch_server_info(self):
-        """Startet eine Abfrage in einem Worker-Thread (UI bleibt responsiv)."""
+    def fetch_server_info(self, manual=False):
+        """Startet eine Abfrage in einem Worker-Thread (UI bleibt responsiv).
+        manual=True: vom Benutzer ausgeloest (Klick) -> sofort Rueckmeldung
+        im Fenster geben."""
+        self.refresh_job = None
         self._current_query += 1
         query_id = self._current_query
-        address = self.app.SERVER_ADDRESS
+        address = tuple(self.app.SERVER_ADDRESS)
+
+        # Anderer Server als der angezeigte: sofort (und ohne dass sich das
+        # Layout bewegt) auf den Ladezustand umschalten. Die ELO-Zeile wird
+        # dabei direkt passend zum Zielserver ein-/ausgeblendet.
+        switched = address != self._shown_address
+        if switched:
+            self._shown_address = address
+            self._has_data = False
+            self._fail_count = 0
+        if switched or manual:
+            self.app.ui.begin_loading(
+                address, switched, elo_visible=self.get_protocol(address) != "q3"
+            )
+
         threading.Thread(
             target=self._query_worker, args=(query_id, address), daemon=True
         ).start()
@@ -192,12 +254,20 @@ class ServerHandler:
         """Eigene ELO per SteamID aus den Optionen, unabhaengig davon ob man
         gerade auf dem Server ist. Gamemode und A/B-Rating kommen ebenfalls aus
         den Optionen (Route /elo bzw. /elo_b). Gibt (elo, games) oder None
-        (keine ID, 0 Spiele, Fehler)."""
+        (keine ID, 0 Spiele, Fehler). Das Ergebnis wird OWN_ELO_TTL Sekunden
+        zwischengespeichert; bei einem Netzwerkfehler bleibt der letzte
+        bekannte Wert stehen, damit die ELO-Zeile nicht hin- und herspringt."""
         steamid = str(self.app.app_config.get("own_steamid", "")).strip()
         if not steamid.isdigit() or not getattr(config, "SHOW_ELO", True):
             return None
         gt = str(self.app.app_config.get("own_gametype", "ca")).lower()
         rating = str(self.app.app_config.get("own_rating", "B")).upper()
+
+        key = (steamid, gt, rating)
+        cached = self._own_elo_cache
+        if cached and cached[0] == key and time.monotonic() - cached[1] < OWN_ELO_TTL:
+            return cached[2]
+
         route = "elo_b" if rating == "B" else "elo"
         # /elo und /elo_b liegen im Root (xonstat), NICHT unter /api (Feeder).
         base = config.QLSTATS_API_BASE.rstrip("/")
@@ -207,52 +277,104 @@ class ServerHandler:
             req = urllib.request.Request(url, headers={"User-Agent": config.APP_NAME})
             with urllib.request.urlopen(req, timeout=config.QLSTATS_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
+            players = data.get("players") or []
+            value = None
+            if players:
+                entry = (players[0] or {}).get(gt) or {}
+                elo = entry.get("elo")
+                games = entry.get("games", 0)
+                if elo is not None and games:   # 0 gewertete Spiele -> ungewertet
+                    value = (int(elo), int(games))
         except Exception:
-            return None
-        players = data.get("players") or []
-        if not players:
-            return None
-        entry = (players[0] or {}).get(gt) or {}
-        elo = entry.get("elo")
-        games = entry.get("games", 0)
-        if elo is None or not games:   # 0 gewertete Spiele -> ungewertet
-            return None
-        return (int(elo), int(games))
+            # Fehler: letzten bekannten Wert fuer dieselben Einstellungen behalten.
+            return cached[2] if cached and cached[0] == key else None
+
+        self._own_elo_cache = (key, time.monotonic(), value)
+        return value
 
     def _query_worker(self, query_id, address):
         """Läuft im Hintergrund-Thread. KEINE Tkinter-Zugriffe hier!"""
-        # Eigene ELO unabhaengig vom Server-Ergebnis (zeigt sie auch, wenn der
-        # getrackte Server gerade down ist).
-        own_elo = self.fetch_own_elo()
-        address = tuple(address)
-        proto = self._protocol_by_address.get(address)
+        known = self._protocol_by_address.get(address)
+        # Die qlstats-Abrufe (HTTP) laufen parallel zur Server-Abfrage, damit
+        # ein Serverwechsel nicht auf die Summe aller Antwortzeiten warten muss.
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
+            # ELO gibt es nur fuer Quake Live (qlstats). Bei bekannten
+            # ioq3-Servern wird sie gar nicht erst abgefragt. Bei QL-Servern
+            # kommt die eigene ELO auch, wenn der Server gerade down ist.
+            own_future = None if known == "q3" else pool.submit(self.fetch_own_elo)
 
-        if proto == "q3":
-            result = self._query_q3(address, own_elo)
-        else:
-            result = self._query_a2s(address, own_elo, timeout=5.0 if proto == "a2s" else 3.0)
-            # Kein A2S und Protokoll noch unbekannt -> vielleicht ein ioq3-Server
-            # (OpenArena, OpenVampArena, ...). Die sprechen nur 'getstatus'.
-            if not result["ok"] and proto is None and not result.get("dns_error"):
-                result = self._query_q3(address, own_elo)
+            result = self._run_query(pool, address, known)
 
-        if result["ok"]:
-            self._protocol_by_address[address] = result["protocol"]
-        else:
-            self._protocol_by_address.pop(address, None)
+            # Bei einem Fehler gilt das zuletzt erkannte Protokoll weiter,
+            # damit ein ioq3-Server auch offline keine ELO zeigt und Connect
+            # weiterhin das Spiel statt Steam startet.
+            protocol = result["protocol"] if result["ok"] else known
+            if protocol == "q3":
+                result["own_elo"] = None
+            elif own_future is not None:
+                result["own_elo"] = own_future.result()
+            else:
+                result["own_elo"] = self.fetch_own_elo()
+        except Exception:
+            # Der Worker muss IMMER ein Ergebnis liefern - sonst wuerde nie
+            # wieder eine Aktualisierung geplant.
+            result = {"ok": False, "msg": "Error.", "own_elo": None}
+        finally:
+            pool.shutdown(wait=False)
+        result["address"] = address
 
         # Ergebnis zurück in den Hauptthread geben
-        root = self.app.root
-        if root and root.winfo_exists() and not self.app.shutting_down:
-            root.after(0, lambda: self._apply_result(query_id, result))
+        try:
+            root = self.app.root
+            if root and root.winfo_exists() and not self.app.shutting_down:
+                root.after(0, lambda: self._apply_result(query_id, result))
+        except Exception:
+            pass   # Fenster wurde inzwischen geschlossen
 
-    def _query_q3(self, address, own_elo):
+    def _run_query(self, pool, address, known):
+        """Fragt den Server ueber das passende Protokoll ab. Laeuft im
+        Worker-Thread -> keine Tk-Zugriffe."""
+        if known == "q3":
+            result = self._query_q3(address)
+            if not result["ok"]:
+                # Keine Antwort: evtl. laeuft unter der Adresse inzwischen ein
+                # Quake-Live-Server.
+                alt = self._query_a2s(pool, address, timeout=2.0)
+                if alt["ok"]:
+                    return alt
+            return result
+
+        if known == "a2s":
+            result = self._query_a2s(pool, address, timeout=5.0)
+            if not result["ok"] and not result.get("dns_error"):
+                alt = self._query_q3(address, timeout=1.5)
+                if alt["ok"]:
+                    return alt
+            return result
+
+        # Protokoll noch unbekannt: erst kurz A2S (Quake Live) probieren, dann
+        # 'getstatus' (ioq3: OpenArena, OpenVampArena, ...). Bewusst
+        # nacheinander: manche Server verwerfen Anfragen, wenn mehrere
+        # gleichzeitig vom selben Absender kommen. Ein Quake-Live-Server
+        # antwortet weit innerhalb der kurzen Frist, ein ioq3-Server wird so
+        # trotzdem schnell erkannt (und danach dauerhaft gemerkt).
+        result = self._query_a2s(pool, address, timeout=1.5)
+        if result["ok"] or result.get("dns_error"):
+            return result
+        alt = self._query_q3(address, timeout=2.0)
+        if alt["ok"]:
+            return alt
+        # Weder noch: einem langsamen Quake-Live-Server eine zweite Chance geben.
+        return self._query_a2s(pool, address, timeout=2.5)
+
+    def _query_q3(self, address, timeout=3.0):
         """Abfrage eines ioq3-Servers ueber das klassische Q3-Protokoll.
         Laeuft im Worker-Thread -> keine Tk-Zugriffe."""
         try:
-            info, players = query_q3_status(address, timeout=3.0)
+            info, players = query_q3_status(address, timeout=timeout)
         except (OSError, ValueError):   # Timeout, DNS, Port zu, Muell-Antwort
-            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
+            return {"ok": False, "msg": "Connection failed."}
 
         ping_ms = self.measure_ping(address, timeout=1.5, payload=OOB + b'getinfo ping')
 
@@ -277,28 +399,39 @@ class ServerHandler:
             "player_count": len(players),
             "ping_ms": ping_ms,
             "game": game,
-            "address": address,
             # qlstats kennt nur Quake-Live-Server -> keine ELO/SteamID/Teams.
             "elo_by_name": {},
             "steamid_by_name": {},
             "team_by_name": {},
             "elo_info": header_info,
             "gamestate": "",
-            "own_elo": own_elo,
         }
 
-    def _query_a2s(self, address, own_elo, timeout=5.0):
-        """Abfrage eines Quake-Live-Servers per A2S (+ qlstats)."""
+    def _query_a2s(self, pool, address, timeout=5.0, info=None):
+        """Abfrage eines Quake-Live-Servers per A2S (+ qlstats). info kann
+        mitgegeben werden, wenn A2S_INFO schon abgefragt wurde."""
         try:
-            info = a2s.info(address, timeout=timeout)
+            if info is None:
+                info = a2s.info(address, timeout=timeout)
+        except socket.gaierror:
+            return {"ok": False, "msg": "Connection failed.", "dns_error": True}
+        except (socket.timeout, ConnectionRefusedError):
+            return {"ok": False, "msg": "Connection failed."}
+        except Exception:
+            return {"ok": False, "msg": "Error."}
+
+        try:
+            # ELO vom qlstats-Feeder: der HTTP-Abruf ist der langsamste Teil
+            # und laeuft deshalb parallel zu den Anfragen an den Spielserver.
+            # Die UDP-Anfragen selbst bleiben nacheinander - manche Server
+            # verwerfen gleichzeitige Anfragen (Rate-Limit).
+            f_qlstats = pool.submit(self.fetch_qlstats_players, address)
+
             ping_ms = self.measure_ping(address, timeout=1.5)
             try:
                 players = a2s.players(address, timeout=5.0)
             except Exception:
                 players = []
-
-            # ELO vom qlstats-Feeder (Netzwerk-Call gehört in den Worker-Thread).
-            elo_by_name, steamid_by_name, team_by_name, elo_info = self.fetch_qlstats_players(address)
 
             # Gamestate aus den A2S-Rules (g_gameState). Manche Server liefern
             # keine Rules -> leer lassen.
@@ -313,6 +446,11 @@ class ServerHandler:
             except Exception:
                 gamestate = ""
 
+            try:
+                elo_by_name, steamid_by_name, team_by_name, elo_info = f_qlstats.result()
+            except Exception:
+                elo_by_name, steamid_by_name, team_by_name, elo_info = {}, {}, {}, None
+
             return {
                 "ok": True,
                 "protocol": "a2s",
@@ -323,32 +461,38 @@ class ServerHandler:
                 "player_count": len(players),
                 "ping_ms": ping_ms,
                 "game": getattr(info, "game", "N/A"),
-                "address": address,
                 "elo_by_name": elo_by_name,
                 "steamid_by_name": steamid_by_name,
                 "team_by_name": team_by_name,
                 "elo_info": elo_info,
                 "gamestate": gamestate,
-                "own_elo": own_elo,
             }
-        except socket.gaierror:
-            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo, "dns_error": True}
-        except (socket.timeout, ConnectionRefusedError):
-            return {"ok": False, "msg": "Connection failed.", "own_elo": own_elo}
         except Exception:
-            return {"ok": False, "msg": "Error.", "own_elo": own_elo}
+            return {"ok": False, "msg": "Error."}
 
     def _apply_result(self, query_id, result):
         """Läuft im Hauptthread. Hier sind Tkinter-Zugriffe erlaubt."""
+        if self.app.shutting_down:
+            return
+        address = result["address"]
+        # Protokoll auch bei veralteten Antworten merken (die Erkennung stimmt ja).
+        if result["ok"]:
+            self._remember_protocol(address, result["protocol"])
         # Veraltete Antwort (Server inzwischen gewechselt)? -> verwerfen
         if query_id != self._current_query:
             return
-        if self.app.shutting_down:
-            return
 
         ui = self.app.ui
+        # ioq3-Server (OpenVampArena, ...): keine ELO-Zeile, keine ELO-Spalte.
+        elo_visible = self.get_protocol(address) != "q3"
+        next_refresh_ms = max(1000, self.app.REFRESH_INTERVAL * 1000)
 
         if result["ok"]:
+            self._fail_count = 0
+            self._has_data = True
+            ui.end_loading()
+            ui.set_elo_visible(elo_visible)
+
             ui.error_message_var.set("")
             ui.server_name_var.set(
                 utils.truncate_text(result["server_name"], config.MAX_SERVER_MAP_NAME_CHARS)
@@ -358,7 +502,7 @@ class ServerHandler:
             )
             ui.set_gamestate(result.get("gamestate"))
             ui.player_count_var.set(f"{result['player_count']}/{result['max_players']}")
-            ui.ip_label_var.set(f"{result['address'][0]}:{result['address'][1]}")
+            ui.ip_label_var.set(f"{address[0]}:{address[1]}")
             ui.ping_var.set(f"{result['ping_ms']}ms")
 
             if hasattr(ui, 'ping_label') and ui.ping_label.winfo_exists():
@@ -376,8 +520,9 @@ class ServerHandler:
                 team_by_name=result.get("team_by_name", {}),
             )
 
-            if self.app.root and self.app.root.winfo_exists():
-                self.app.root.after(0, ui.auto_adjust_window_geometry)
+            # Direkt (nicht per after) anpassen: so wird alles in einem
+            # einzigen Schritt gezeichnet, ohne sichtbaren Zwischenzustand.
+            ui.auto_adjust_window_geometry()
 
             self.app.root.title(
                 f"{config.APP_NAME} – {result['player_count']}/{result['max_players']}"
@@ -387,30 +532,46 @@ class ServerHandler:
                     f"Players: {result['player_count']}/{result['max_players']}"
                 )
         else:
-            self.handle_connection_error(result.get("msg", "Error."))
-            ui.set_own_elo(result.get("own_elo"))
+            self._fail_count += 1
+            if self._has_data and self._fail_count < FAILS_UNTIL_ERROR:
+                # Einzelner Aussetzer bei einem Server, der gerade noch
+                # geantwortet hat: Anzeige stehen lassen und zuegig nochmal
+                # versuchen, statt alles kurz auf "Connection failed" zu kippen.
+                next_refresh_ms = min(next_refresh_ms, 3000)
+            else:
+                self._has_data = False
+                ui.end_loading()
+                ui.set_elo_visible(elo_visible)
+                self.handle_connection_error(result.get("msg", "Error."), address)
+                ui.set_own_elo(result.get("own_elo"))
+                ui.auto_adjust_window_geometry()
 
         # Aktiven Favoriten-Button markieren (Server kann gewechselt haben).
         ui.refresh_hotkey_buttons()
 
         # Nächste Abfrage planen (immer im Hauptthread)
         if self.app.root and self.app.root.winfo_exists() and not self.app.shutting_down:
-            self.refresh_job = self.app.root.after(
-                max(1000, self.app.REFRESH_INTERVAL * 1000), self.fetch_server_info
-            )
+            self.refresh_job = self.app.root.after(next_refresh_ms, self.fetch_server_info)
 
-    def handle_connection_error(self, msg):
+    def handle_connection_error(self, msg, address=None):
         ui = self.app.ui
         ui.error_message_var.set(msg)
         ui.ping_var.set("N/A")
         ui.server_name_var.set("Connection failed")
         ui.map_name_var.set("N/A")
+        ui.player_count_var.set("-")
         ui.set_gamestate("")
-        ui.ip_label_var.set("N/A")
+        # Die Adresse bleibt sichtbar (und kopierbar), auch wenn der Server
+        # nicht antwortet.
+        if address and address[0]:
+            ui.ip_label_var.set(f"{address[0]}:{address[1]}")
+        else:
+            ui.ip_label_var.set("N/A")
         ui.game_type_var.set("N/A")
         ui.set_server_elo_info(None)
         ui.set_placeholder_or_clear_preview()
         ui.update_player_list([], elo_by_name={}, steamid_by_name={}, team_by_name={})
+        self.app.root.title(config.APP_NAME)
 
     def stop_refresh(self):
         try:
@@ -421,21 +582,9 @@ class ServerHandler:
             pass
 
     def manual_refresh(self, icon=None, item=None):
-        ui = self.app.ui
-        if self.refresh_job:
-            try:
-                self.app.root.after_cancel(self.refresh_job)
-            except Exception:
-                pass
-            self.refresh_job = None
-
-        ui.server_name_var.set("Refreshing...")
-        ui.player_count_var.set("...")
-        ui.map_name_var.set("...")
-        ui.set_gamestate("")
-        ui.ip_label_var.set("...")
-        ui.ping_var.set("...")
-        ui.game_type_var.set("...")
-        ui.set_server_elo_info(None)
-
-        self.fetch_server_info()
+        """Sofortige Aktualisierung (Klick aufs Bild, Favoriten-Button, Tray).
+        Die Anzeige wird dabei nicht mehr geleert: Beim selben Server bleiben
+        die Daten stehen (nur der Ping zeigt '...'), bei einem anderen Server
+        schaltet fetch_server_info auf den Ladezustand um."""
+        self.stop_refresh()
+        self.fetch_server_info(manual=True)

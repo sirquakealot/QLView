@@ -124,6 +124,9 @@ def load_app_config():
         "own_gametype": "ca",
         "own_rating": "B",
         "ioq3_exe": "",
+        # Als ioq3 erkannte Server ("ip:port,ip:port"). Damit ist schon beim
+        # Programmstart/Serverwechsel klar, dass es dort keine ELO gibt.
+        "q3_servers": "",
     }
     parser = configparser.ConfigParser(interpolation=None)
     
@@ -142,6 +145,7 @@ def load_app_config():
         app_cfg["own_gametype"] = parser.get("settings", "own_gametype", fallback="ca")
         app_cfg["own_rating"] = parser.get("settings", "own_rating", fallback="B")
         app_cfg["ioq3_exe"] = parser.get("settings", "ioq3_exe", fallback="")
+        app_cfg["q3_servers"] = parser.get("settings", "q3_servers", fallback="")
 
         # LOGIK FÜR DIE PLAYER-LISTE (Konvertierung/Laden)
         new_position = parser.get("settings", "player_list_position", fallback=None)
@@ -254,7 +258,10 @@ def toggle_autostart(should_start):
             except Exception as e:
                 print(f"ERROR: Could not remove shortcut: {e}")
 
-def save_app_config(app):
+def save_app_config(app, update_autostart=True):
+    """Schreibt die config.ini. update_autostart=False ueberspringt das
+    (langsame) Anlegen/Entfernen der Autostart-Verknuepfung - fuer Speichern
+    im Hintergrund, bei dem sich diese Einstellung gar nicht geaendert hat."""
     parser = configparser.ConfigParser(interpolation=None)
     parser.add_section("settings")
     parser.set("settings", "server", f"{app.main_server_address_setting[0]}:{app.main_server_address_setting[1]}")
@@ -265,8 +272,13 @@ def save_app_config(app):
     
     parser.set("settings", "player_list_position", app.ui.player_list_position_var.get())
     
-    scheme_name = next((name for name, scheme in config.COLOR_SCHEMES.items() if scheme == app.ui.current_color_scheme), "Dark1")
+    # Gespeichertes Schema nehmen, nicht das gerade angezeigte: sonst wuerde
+    # eine noch nicht bestaetigte Live-Vorschau aus den Optionen mitgespeichert.
+    scheme_name = app.app_config.get("color_scheme")
+    if scheme_name not in config.COLOR_SCHEMES:
+        scheme_name = next((name for name, scheme in config.COLOR_SCHEMES.items() if scheme == app.ui.current_color_scheme), "Dark1")
     parser.set("settings", "color_scheme", scheme_name)
+    parser.set("settings", "q3_servers", app.app_config.get("q3_servers", ""))
     parser.set("settings", "own_steamid", app.app_config.get("own_steamid", ""))
     parser.set("settings", "own_gametype", app.app_config.get("own_gametype", "ca"))
     parser.set("settings", "own_rating", app.app_config.get("own_rating", "B"))
@@ -279,4 +291,5 @@ def save_app_config(app):
         print(f"ERROR: Could not write to config file '{config.CONFIG_FILE}': {e}")
     
     # Autostart nach Speicherung der Konfiguration umschalten
-    toggle_autostart(app.ui.start_with_system_var.get())
+    if update_autostart:
+        toggle_autostart(app.ui.start_with_system_var.get())
