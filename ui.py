@@ -813,10 +813,13 @@ class UIManager:
         return text_widget
 
     def _find_mapshot(self, filename):
-        """Sucht ein Mapbild zuerst im Mapshots-Ordner neben der exe bzw. im
-        Startordner (eigene Bilder), dann in den mitgelieferten Mapshots.
-        PyInstaller 6 legt die mitgelieferten nach _internal (= sys._MEIPASS)."""
-        for folder in dict.fromkeys([os.path.abspath(config.MAPSHOTS_DIR),
+        """Sucht ein Mapbild im Mapshots-Ordner neben der exe (bzw. main.py),
+        dann im Startordner, zuletzt in _internal (= sys._MEIPASS).
+        Der Ordner neben der exe zaehlt auch, wenn das Programm aus einem
+        anderen Arbeitsordner gestartet wird (z.B. eigene Verknuepfung)."""
+        app_dir = os.path.dirname(utils.get_application_path())
+        for folder in dict.fromkeys([os.path.join(app_dir, config.MAPSHOTS_DIR),
+                                     os.path.abspath(config.MAPSHOTS_DIR),
                                      utils.resource_path(config.MAPSHOTS_DIR)]):
             path = os.path.join(folder, filename)
             if os.path.exists(path):
